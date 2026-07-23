@@ -21,8 +21,8 @@ vars:
   CURRENT_WINDOWS_ARCH: '{{if eq ARCH "386"}}386{{else}}amd64{{end}}'
   CURRENT_WINDOWS_NAME: '{{if eq .CURRENT_WINDOWS_ARCH "386"}}windows-32{{else}}windows-64{{end}}'
   CURRENT_DARWIN_NAME: '{{if eq ARCH "arm64"}}macos-arm64{{else}}macos-intel{{end}}'
-  CURRENT_LINUX_ARCH: "amd64"
-  CURRENT_LINUX_NAME: "linux-amd64"
+  CURRENT_LINUX_ARCH: '{{if eq ARCH "arm64"}}arm64{{else}}amd64{{end}}'
+  CURRENT_LINUX_NAME: 'linux-{{.CURRENT_LINUX_ARCH}}'
 
 tasks:
   build:
@@ -144,6 +144,17 @@ tasks:
           ARCHIVE_PATH: '{{.BIN_DIR}}/linux-amd64.tar.gz'
           SCAN: '{{.SCAN}}'
 
+  build:linux:arm64:
+    cmds:
+      - task: linux:package:archive
+        vars:
+          ARCH: arm64
+          BINARY_NAME: linux-arm64
+          OUTPUT: '{{.BIN_DIR}}/linux-arm64'
+          ARCHIVE_BINARY_NAME: '{{.APP_NAME}}'
+          ARCHIVE_PATH: '{{.BIN_DIR}}/linux-arm64.tar.gz'
+          SCAN: '{{.SCAN}}'
+
   cursor-tab-server:docker:amd64:
     summary: 构建 cursor-tab-server 的 linux/amd64 Docker 镜像并保存到 cursor-tab-server 目录
     vars:
@@ -168,8 +179,8 @@ tasks:
     internal: true
     cmds:
       - mkdir -p "{{.BIN_DIR}}"
-      - rm -f "{{.BIN_DIR}}/macos-arm64.dmg" "{{.BIN_DIR}}/macos-intel.dmg" "{{.BIN_DIR}}/windows-32.zip" "{{.BIN_DIR}}/windows-64.zip" "{{.BIN_DIR}}/linux-amd64.tar.gz"
-      - rm -f "{{.BIN_DIR}}/macos-arm64" "{{.BIN_DIR}}/macos-intel" "{{.BIN_DIR}}/windows-32.exe" "{{.BIN_DIR}}/windows-64.exe" "{{.BIN_DIR}}/linux-amd64"
+      - rm -f "{{.BIN_DIR}}/macos-arm64.dmg" "{{.BIN_DIR}}/macos-intel.dmg" "{{.BIN_DIR}}/windows-32.zip" "{{.BIN_DIR}}/windows-64.zip" "{{.BIN_DIR}}/linux-amd64.tar.gz" "{{.BIN_DIR}}/linux-arm64.tar.gz"
+      - rm -f "{{.BIN_DIR}}/macos-arm64" "{{.BIN_DIR}}/macos-intel" "{{.BIN_DIR}}/windows-32.exe" "{{.BIN_DIR}}/windows-64.exe" "{{.BIN_DIR}}/linux-amd64" "{{.BIN_DIR}}/linux-arm64"
       - rm -f "{{.BIN_DIR}}/{{.APP_NAME}}" "{{.BIN_DIR}}/{{.APP_NAME}}.exe"
       - rm -rf "{{.BIN_DIR}}/macos-arm64.app" "{{.BIN_DIR}}/macos-intel.app" "{{.BIN_DIR}}/{{.APP_NAME}}.app" "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app"
 
@@ -209,6 +220,9 @@ tasks:
     summary: 构建 Linux 交叉编译 Docker 镜像
     cmds:
       - task: common:setup:docker
+        vars:
+          ARCH:
+            ref: .ARCH
 
   release:clean:
     summary: 清理当前版本的发布目录
@@ -244,7 +258,6 @@ tasks:
           SCAN: '{{.SCAN}}'
 
   release:build:macos:amd64:
-    internal: true
     cmds:
       - task: darwin:package:archive
         vars:
@@ -273,6 +286,17 @@ tasks:
           OUTPUT: '{{.BIN_DIR}}/cursor-release-linux-amd64'
           ARCHIVE_BINARY_NAME: '{{.APP_NAME}}'
           ARCHIVE_PATH: '{{.RELEASE_DIR}}/{{.RELEASE_BASE_NAME}}-{{.APP_VERSION}}-linux-amd64.tar.gz'
+          SCAN: '{{.SCAN}}'
+
+  release:build:linux:arm64:
+    cmds:
+      - task: linux:package:archive
+        vars:
+          ARCH: arm64
+          BINARY_NAME: cursor-release-linux-arm64
+          OUTPUT: '{{.BIN_DIR}}/cursor-release-linux-arm64'
+          ARCHIVE_BINARY_NAME: '{{.APP_NAME}}'
+          ARCHIVE_PATH: '{{.RELEASE_DIR}}/{{.RELEASE_BASE_NAME}}-{{.APP_VERSION}}-linux-arm64.tar.gz'
           SCAN: '{{.SCAN}}'
 
   release:manifest:
@@ -306,6 +330,7 @@ tasks:
       - task: release:build:macos:amd64
       - task: release:build:windows:amd64
       - task: release:build:linux:amd64
+      - task: release:build:linux:arm64
 
   release:prepare:linux:
     summary: 在当前主机上生成 Linux 发布资产
@@ -319,6 +344,7 @@ tasks:
       - task: common:update:build-assets
       - task: release:notes
       - task: release:build:linux:amd64
+      - task: release:build:linux:arm64
 
   release:verify:assets:
     summary: 验证当前版本发布资产是否齐全
@@ -333,6 +359,8 @@ tasks:
         msg: "缺少 Windows amd64 发布资产。"
       - sh: test -f "{{.RELEASE_DIR}}/{{.RELEASE_BASE_NAME}}-{{.APP_VERSION}}-linux-amd64.tar.gz"
         msg: "缺少 Linux amd64 发布资产。"
+      - sh: test -f "{{.RELEASE_DIR}}/{{.RELEASE_BASE_NAME}}-{{.APP_VERSION}}-linux-arm64.tar.gz"
+        msg: "缺少 Linux arm64 发布资产。"
     cmds:
       - echo "release assets verified"
 

@@ -74,6 +74,36 @@ log: true
 
 如果关闭开关时中转站返回 `This account only allows Codex official clients`，而开启后能够正常流式响应，说明该中转站的 Codex 客户端限制和本功能均已生效。
 
+## 多平台构建与发布
+
+仓库通过 [`.github/workflows/release.yml`](.github/workflows/release.yml) 分平台构建以下发布资产：
+
+- Windows amd64：`windows-latest`
+- macOS amd64：`macos-15-intel`
+- macOS arm64：`macos-15`
+- Linux amd64：`ubuntu-24.04`
+- Linux arm64：`ubuntu-24.04-arm`
+
+在 GitHub 仓库的 Actions 页面手动运行 `Build and release` 时，只构建并保存 Actions Artifact。推送与 `build/config.yml` 中版本一致的标签时，会在所有平台构建成功后生成 `update.json` 并创建或更新 GitHub Release：
+
+```bash
+git tag v0.0.40
+git push origin v0.0.40
+```
+
+工作流需要仓库启用 GitHub Actions，并允许工作流使用 `contents: write` 权限。Linux arm64 使用 GitHub 托管 ARM64 runner；如果当前仓库不可使用 `ubuntu-24.04-arm`，需要把该 runner 标签替换为自托管 ARM64 Linux runner。
+
+当前 macOS 产物使用 ad-hoc 签名，Windows ZIP 未进行 Authenticode 签名。正式分发时，应将签名证书保存到 GitHub Secrets，并在对应构建任务中增加签名和 macOS 公证步骤。
+
+本地 Linux 构建也支持双架构。在对应架构的 Linux 主机上会自动使用原生 CGO 构建；从 macOS/Linux 交叉构建前，需要先创建对应 Docker 镜像：
+
+```bash
+wails3 task setup:docker ARCH=amd64
+wails3 task setup:docker ARCH=arm64
+wails3 task build:linux:amd64
+wails3 task build:linux:arm64
+```
+
 ## 后续
 
 后续会继续扩展更多工具和使用场景，包括但不限于：

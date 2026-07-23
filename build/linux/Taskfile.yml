@@ -4,7 +4,6 @@ includes:
   common: ../Taskfile.yml
 
 vars:
-  CROSS_IMAGE: cursor-linux-amd64-cross
   PROJECT_ROOT:
     sh: 'cd "{{.TASKFILE_DIR}}/../.." && pwd'
 
@@ -18,8 +17,8 @@ tasks:
       HAS_CC:
         sh: '(command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1) && echo "true" || echo "false"'
     preconditions:
-      - sh: '[ "{{.TARGET_ARCH}}" = "amd64" ]'
-        msg: "当前仅支持 linux/amd64 构建。"
+      - sh: '[ "{{.TARGET_ARCH}}" = "amd64" ] || [ "{{.TARGET_ARCH}}" = "arm64" ]'
+        msg: "Linux 构建仅支持 amd64 或 arm64。"
     cmds:
       - task: '{{if and (eq OS "linux") (eq .HAS_CC "true") (eq .TARGET_ARCH ARCH)}}build:native{{else}}build:docker{{end}}'
         vars:
@@ -93,13 +92,14 @@ tasks:
       - sh: docker image inspect {{.CROSS_IMAGE}} >/dev/null 2>&1
         msg: "未找到 Docker 镜像 '{{.CROSS_IMAGE}}'，请先执行 task setup:docker。"
     cmds:
-      - docker run --rm --platform "{{.DOCKER_PLATFORM}}" --entrypoint /bin/sh -v "{{.PROJECT_ROOT}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e GOPATH=/go -e GOMODCACHE=/go/pkg/mod -e APP_NAME="{{.APP_NAME}}" -e EXTRA_LDFLAGS="-X cursor/internal/buildinfo.Version={{.APP_VERSION}}" -e GO_BUILD_LOG_MODE="{{.GO_BUILD_LOG_MODE}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} "{{.CROSS_IMAGE}}" /app/build/docker/build-linux.sh
+      - docker run --rm --platform "{{.DOCKER_PLATFORM}}" --entrypoint /bin/sh -v "{{.PROJECT_ROOT}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e GOPATH=/go -e GOMODCACHE=/go/pkg/mod -e APP_NAME="{{.APP_NAME}}" -e TARGET_ARCH="{{.DOCKER_ARCH}}" -e EXTRA_LDFLAGS="-X cursor/internal/buildinfo.Version={{.APP_VERSION}}" -e GO_BUILD_LOG_MODE="{{.GO_BUILD_LOG_MODE}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} "{{.CROSS_IMAGE}}" /app/build/docker/build-linux.sh
       - docker run --rm --platform "{{.DOCKER_PLATFORM}}" --entrypoint chown -v "{{.PROJECT_ROOT}}:/app" "{{.CROSS_IMAGE}}" -R $(id -u):$(id -g) /app/bin
       - mkdir -p "{{.BIN_DIR}}"
       - mv "bin/{{.APP_NAME}}-linux-{{.DOCKER_ARCH}}" "{{.OUTPUT}}"
     vars:
       DOCKER_ARCH: '{{.ARCH | default "amd64"}}'
       DOCKER_PLATFORM: 'linux/{{.DOCKER_ARCH}}'
+      CROSS_IMAGE: 'cursor-linux-{{.DOCKER_ARCH}}-cross'
       DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
       GO_BUILD_LOG_MODE: '{{.GO_BUILD_LOG_MODE | default "quiet"}}'
       OUTPUT: '{{.OUTPUT | default .DEFAULT_OUTPUT}}'

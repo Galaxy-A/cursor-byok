@@ -149,5 +149,10 @@ tasks:
         msg: "未检测到可用的 Docker daemon，请先启动 Docker。"
       - sh: test -f ./build/docker/Dockerfile.cross
         msg: "未找到 build/docker/Dockerfile.cross。"
+      - sh: '[ "{{.TARGET_ARCH}}" = "amd64" ] || [ "{{.TARGET_ARCH}}" = "arm64" ]'
+        msg: "Linux Docker 构建仅支持 amd64 或 arm64。"
     cmds:
-      - docker build --platform linux/amd64{{if .BASE_IMAGE}} --build-arg BASE_IMAGE="{{.BASE_IMAGE}}"{{end}}{{if .GO_TARBALL_URL}} --build-arg GO_TARBALL_URL="{{.GO_TARBALL_URL}}"{{end}} -t cursor-linux-amd64-cross -f ./build/docker/Dockerfile.cross ./build/docker
+      - docker build --platform "linux/{{.TARGET_ARCH}}" --build-arg TARGETARCH="{{.TARGET_ARCH}}"{{if .BASE_IMAGE}} --build-arg BASE_IMAGE="{{.BASE_IMAGE}}"{{end}}{{if .GO_VERSION}} --build-arg GO_VERSION="{{.GO_VERSION}}"{{end}}{{if .GO_TARBALL_URL}} --build-arg GO_TARBALL_URL="{{.GO_TARBALL_URL}}"{{end}} -t "{{.CROSS_IMAGE}}" -f ./build/docker/Dockerfile.cross ./build/docker
+    vars:
+      TARGET_ARCH: '{{.ARCH | default "amd64"}}'
+      CROSS_IMAGE: 'cursor-linux-{{.TARGET_ARCH}}-cross'

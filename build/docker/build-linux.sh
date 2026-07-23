@@ -6,12 +6,12 @@ log() {
 }
 
 export GOOS=linux
-export GOARCH=amd64
+export GOARCH="${TARGET_ARCH:-amd64}"
 export CGO_ENABLED=1
 export CGO_CFLAGS="-w"
 
 APP=${APP_NAME:-$(basename "$(pwd)")}
-BIN_PATH="bin/${APP}-linux-amd64"
+BIN_PATH="bin/${APP}-linux-${GOARCH}"
 LOG_MODE=${GO_BUILD_LOG_MODE:-quiet}
 
 case "$LOG_MODE" in
