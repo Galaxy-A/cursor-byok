@@ -52,6 +52,8 @@ type ModelAdapterConfig struct {
 	ReasoningEffort string `json:"reasoningEffort"`
 	// OpenAIEndpoint 表示 OpenAI 兼容适配器使用的 API 端点。
 	OpenAIEndpoint string `json:"openAIEndpoint"`
+	// CodexOutboundEnabled 表示 OpenAI 请求是否使用 Codex CLI 出站协议。
+	CodexOutboundEnabled bool `json:"codexOutboundEnabled"`
 	// OpenAIExtraParamsEnabled 表示是否启用 OpenAI 额外请求参数。
 	OpenAIExtraParamsEnabled bool `json:"openAIExtraParamsEnabled"`
 	// OpenAIExtraParamsJSON 表示 OpenAI 额外请求参数 JSON 对象。
@@ -117,6 +119,10 @@ func NormalizeModelAdapterConfigs(input []ModelAdapterConfig) ([]ModelAdapterCon
 			ThinkingBudgetTokens: normalizeMaxCompletionTokens(item.ThinkingBudgetTokens),
 		}
 		if next.Type == "openai" {
+			next.CodexOutboundEnabled = item.CodexOutboundEnabled
+			if next.CodexOutboundEnabled && next.OpenAIEndpoint != modelchannel.OpenAIEndpointCustom {
+				next.OpenAIEndpoint = modelchannel.OpenAIEndpointResponses
+			}
 			next.OpenAIExtraParamsEnabled = item.OpenAIExtraParamsEnabled
 			next.OpenAIExtraParamsJSON = strings.TrimSpace(item.OpenAIExtraParamsJSON)
 		} else if next.Type == "anthropic" {
@@ -141,6 +147,8 @@ func NormalizeModelAdapterConfigs(input []ModelAdapterConfig) ([]ModelAdapterCon
 			return nil, errors.New("模型适配器 reasoningEffort 仅支持 low、medium、high、xhigh、max")
 		case next.Type == "openai" && next.OpenAIEndpoint == "":
 			return nil, errors.New("模型适配器 openAIEndpoint 仅支持 /v1/responses 或 /v1/chat/completions")
+		case next.Type == "openai" && next.CodexOutboundEnabled && next.OpenAIEndpoint == modelchannel.OpenAIEndpointCustom && !strings.HasSuffix(strings.ToLower(next.BaseURL), "/responses"):
+			return nil, errors.New("启用 Codex 出站协议时，自定义 OpenAI 地址必须以 /responses 结尾")
 		case next.Type == "openai" && next.OpenAIExtraParamsEnabled:
 			if err := validateJSONMap(next.OpenAIExtraParamsJSON, "openAIExtraParamsJSON"); err != nil {
 				return nil, err
@@ -267,6 +275,8 @@ type ResolvedChannel struct {
 	ReasoningEffort string
 	// OpenAIEndpoint 表示 OpenAI 兼容适配器使用的 API 端点。
 	OpenAIEndpoint string
+	// CodexOutboundEnabled 表示 OpenAI 请求是否使用 Codex CLI 出站协议。
+	CodexOutboundEnabled bool
 	// OpenAIExtraParamsEnabled 表示是否启用 OpenAI 额外请求参数。
 	OpenAIExtraParamsEnabled bool
 	// OpenAIExtraParamsJSON 表示 OpenAI 额外请求参数 JSON 对象。
@@ -399,6 +409,7 @@ func (s *FixedChannelService) SelectChannelForModel(ctx context.Context, modelID
 			MaxTokens:                   configurableChannelMaxTokens,
 			ReasoningEffort:             strings.TrimSpace(adapter.ReasoningEffort),
 			OpenAIEndpoint:              strings.TrimSpace(adapter.OpenAIEndpoint),
+			CodexOutboundEnabled:        adapter.CodexOutboundEnabled,
 			OpenAIExtraParamsEnabled:    adapter.OpenAIExtraParamsEnabled,
 			OpenAIExtraParamsJSON:       strings.TrimSpace(adapter.OpenAIExtraParamsJSON),
 			CustomHeadersEnabled:        adapter.CustomHeadersEnabled,

@@ -248,6 +248,7 @@ func (s *ProxyService) executeOpenAIStreamingTest(ctx context.Context, adapter s
 		ResolvedContextWindowTokens: adapter.ContextWindowTokens,
 		ReasoningEffort:             strings.TrimSpace(adapter.ReasoningEffort),
 		OpenAIEndpoint:              strings.TrimSpace(adapter.OpenAIEndpoint),
+		CodexOutboundEnabled:        adapter.CodexOutboundEnabled,
 		OpenAIExtraParamsEnabled:    adapter.OpenAIExtraParamsEnabled,
 		OpenAIExtraParamsJSON:       strings.TrimSpace(adapter.OpenAIExtraParamsJSON),
 		CustomHeadersEnabled:        adapter.CustomHeadersEnabled,
@@ -594,6 +595,7 @@ func buildModelAdapterTestRequestHash(adapter serverconfig.ModelAdapterConfig) s
 		source.ModelID,
 		source.ReasoningEffort,
 		source.OpenAIEndpoint,
+		strconv.Itoa(source.CodexOutboundEnabled),
 		strconv.Itoa(source.OpenAIExtraParamsEnabled),
 		source.OpenAIExtraParamsJSON,
 		strconv.Itoa(source.CustomHeadersEnabled),
@@ -618,6 +620,7 @@ type modelAdapterTestHashSource struct {
 	ModelID                     string
 	ReasoningEffort             string
 	OpenAIEndpoint              string
+	CodexOutboundEnabled        int
 	OpenAIExtraParamsEnabled    int
 	OpenAIExtraParamsJSON       string
 	CustomHeadersEnabled        int
@@ -642,6 +645,7 @@ func normalizeModelAdapterTestHashSource(adapter serverconfig.ModelAdapterConfig
 		ModelID:                     strings.TrimSpace(adapter.ModelID),
 		ReasoningEffort:             normalizeModelAdapterTestProviderReasoning(adapter),
 		OpenAIEndpoint:              modelchannel.NormalizeOpenAIEndpoint(adapter.Type, adapter.OpenAIEndpoint),
+		CodexOutboundEnabled:        normalizeModelAdapterTestBool(adapter.Type == "openai" && adapter.CodexOutboundEnabled),
 		OpenAIExtraParamsEnabled:    normalizeModelAdapterTestBool(adapter.Type == "openai" && adapter.OpenAIExtraParamsEnabled),
 		OpenAIExtraParamsJSON:       normalizeModelAdapterTestOpenAIExtraParamsJSON(adapter),
 		CustomHeadersEnabled:        normalizeModelAdapterTestBool(adapter.CustomHeadersEnabled),

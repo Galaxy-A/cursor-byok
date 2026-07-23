@@ -30,6 +30,7 @@ type ModelAdapterConfig struct {
 	ModelID                     string `json:"modelID" yaml:"modelID"`
 	ReasoningEffort             string `json:"reasoningEffort" yaml:"reasoningEffort"`
 	OpenAIEndpoint              string `json:"openAIEndpoint" yaml:"openAIEndpoint"`
+	CodexOutboundEnabled        bool   `json:"codexOutboundEnabled" yaml:"codexOutboundEnabled"`
 	OpenAIExtraParamsEnabled    bool   `json:"openAIExtraParamsEnabled" yaml:"openAIExtraParamsEnabled"`
 	OpenAIExtraParamsJSON       string `json:"openAIExtraParamsJSON" yaml:"openAIExtraParamsJSON"`
 	CustomHeadersEnabled        bool   `json:"customHeadersEnabled" yaml:"customHeadersEnabled"`
@@ -131,6 +132,10 @@ func NormalizeModelAdapterConfigs(input []ModelAdapterConfig) ([]ModelAdapterCon
 			ThinkingBudgetTokens: normalizeMaxCompletionTokens(item.ThinkingBudgetTokens),
 		}
 		if next.Type == "openai" {
+			next.CodexOutboundEnabled = item.CodexOutboundEnabled
+			if next.CodexOutboundEnabled && next.OpenAIEndpoint != modelchannel.OpenAIEndpointCustom {
+				next.OpenAIEndpoint = modelchannel.OpenAIEndpointResponses
+			}
 			next.OpenAIExtraParamsEnabled = item.OpenAIExtraParamsEnabled
 			next.OpenAIExtraParamsJSON = strings.TrimSpace(item.OpenAIExtraParamsJSON)
 		} else if next.Type == "anthropic" {
@@ -155,6 +160,8 @@ func NormalizeModelAdapterConfigs(input []ModelAdapterConfig) ([]ModelAdapterCon
 			return nil, errors.New("模型适配器 reasoningEffort 仅支持 low、medium、high、xhigh、max")
 		case next.Type == "openai" && next.OpenAIEndpoint == "":
 			return nil, errors.New("模型适配器 openAIEndpoint 仅支持 /v1/responses、/v1/chat/completions 或 /custom（自定义路径）")
+		case next.Type == "openai" && next.CodexOutboundEnabled && next.OpenAIEndpoint == modelchannel.OpenAIEndpointCustom && !strings.HasSuffix(strings.ToLower(next.BaseURL), "/responses"):
+			return nil, errors.New("启用 Codex 出站协议时，自定义 OpenAI 地址必须以 /responses 结尾")
 		case next.Type == "openai" && next.OpenAIExtraParamsEnabled:
 			if err := validateJSONMap(next.OpenAIExtraParamsJSON, "openAIExtraParamsJSON"); err != nil {
 				return nil, err

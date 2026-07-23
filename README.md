@@ -19,6 +19,61 @@
 [正式版路线图](https://github.com/leookun/cursor-byok/discussions/32)
 [详细使用教程](https://dcne38qm5vlg.feishu.cn/wiki/JeP7wdGnziBXuikNaF5czWbrn8c)
 
+## Codex 出站协议
+
+对于只接受 Codex 官方客户端请求的 OpenAI 中转站，可以在对应的 OpenAI 模型配置中开启“启用 Codex 出站协议”。开启后，请求链路为：
+
+```text
+Cursor 请求
+-> Cursor助手
+-> Codex CLI Responses 请求
+-> OpenAI 官网或中转站
+-> Cursor助手转换 Responses SSE
+-> Cursor AgentServerMessage
+```
+
+### 配置方式
+
+1. 打开 Cursor助手的模型配置。
+2. 新建或编辑一个类型为 OpenAI 的模型。
+3. 开启“启用 Codex 出站协议”。
+4. 使用 `/v1/responses` 端点；选择自定义路径时，API 地址必须以 `/responses` 结尾。
+
+对应的 `config.yaml` 配置示例：
+
+```yaml
+modelAdapters:
+  - displayName: codex-model
+    type: openai
+    baseURL: https://api.example.com
+    apiKey: YOUR_API_KEY
+    modelID: gpt-5-codex
+    reasoningEffort: medium
+    openAIEndpoint: /v1/responses
+    codexOutboundEnabled: true
+```
+
+开启后，Cursor助手会补充 Codex CLI 客户端标识和稳定的会话标识，并设置 Codex Responses 所需的请求字段，包括流式输出、prompt cache key、reasoning summary 和工具调用选项。中转站返回的 Responses SSE 会继续转换为 Cursor 可识别的文本、思考、工具调用、使用量和回合结束消息。
+
+该开关仅适用于 OpenAI 类型的模型和 Responses API。关闭开关后，请求恢复为通用 OpenAI 出站协议。自定义请求头在 Codex 默认请求头之后应用，因此可以按中转站要求覆盖默认值。
+
+### 调试验证
+
+在 `~/.cursor-local-assistant-v2/config.yaml` 中开启日志：
+
+```yaml
+log: true
+```
+
+下一次请求会在 `history/<conversationId>/debug/` 下生成：
+
+- `provider.jsonl`：最终 provider 请求体、响应分片和调用结果。
+- `runsse.jsonl`：转换后发送给 Cursor 的消息。
+- `bidi.raw.jsonl` 和 `bidi.decoded.jsonl`：Cursor 上行请求的原始与解码记录。
+- `runtime.jsonl`：请求状态和 provider pass 流转。
+
+如果关闭开关时中转站返回 `This account only allows Codex official clients`，而开启后能够正常流式响应，说明该中转站的 Codex 客户端限制和本功能均已生效。
+
 ## 后续
 
 后续会继续扩展更多工具和使用场景，包括但不限于：

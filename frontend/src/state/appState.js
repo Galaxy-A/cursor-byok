@@ -182,6 +182,7 @@ export function buildModelAdapterTestRequestHash(source) {
     asString(adapter.modelID),
     adapter.type === "openai" ? asString(adapter.reasoningEffort || "medium") : "",
     adapter.type === "openai" ? normalizeOpenAIEndpoint(adapter.openAIEndpoint) : "",
+    adapter.type === "openai" ? String(Boolean(adapter.codexOutboundEnabled)) : "false",
     adapter.type === "openai" ? String(Boolean(adapter.openAIExtraParamsEnabled)) : "false",
     adapter.type === "openai" && adapter.openAIExtraParamsEnabled ? asString(adapter.openAIExtraParamsJSON) : "",
     String(Boolean(adapter.customHeadersEnabled)),
@@ -270,6 +271,7 @@ export function createEmptyModelAdapter() {
     modelID: "",
     reasoningEffort: "medium",
     openAIEndpoint: OPENAI_ENDPOINT_RESPONSES,
+    codexOutboundEnabled: false,
     openAIExtraParamsEnabled: false,
     openAIExtraParamsJSON: OPENAI_EXTRA_PARAMS_DEFAULT_JSON,
     customHeadersEnabled: false,
@@ -353,6 +355,9 @@ export function normalizeModelAdapter(source) {
   const normalizedOpenAIEndpoint = normalizeOpenAIEndpoint(
     raw.openAIEndpoint ?? raw.openaiEndpoint ?? raw.open_ai_endpoint ?? raw.endpoint,
   );
+  const codexOutboundEnabled = normalizedType === "openai"
+    ? asBoolean(raw.codexOutboundEnabled ?? raw.codex_outbound_enabled)
+    : false;
   const openAIExtraParamsEnabled = normalizedType === "openai"
     ? asBoolean(raw.openAIExtraParamsEnabled ?? raw.openaiExtraParamsEnabled ?? raw.open_ai_extra_params_enabled)
     : false;
@@ -378,7 +383,12 @@ export function normalizeModelAdapter(source) {
     reasoningEffort: SUPPORTED_REASONING_EFFORTS.has(normalizedReasoningEffort)
       ? normalizedReasoningEffort
       : "medium",
-    openAIEndpoint: normalizedType === "openai" ? normalizedOpenAIEndpoint : "",
+    openAIEndpoint: normalizedType === "openai"
+      ? (codexOutboundEnabled && normalizedOpenAIEndpoint !== OPENAI_ENDPOINT_CUSTOM
+        ? OPENAI_ENDPOINT_RESPONSES
+        : normalizedOpenAIEndpoint)
+      : "",
+    codexOutboundEnabled,
     openAIExtraParamsEnabled,
     openAIExtraParamsJSON,
     customHeadersEnabled,
@@ -437,6 +447,14 @@ export function validateModelAdapters(source) {
     }
     if (adapter.type === "openai" && !isValidOpenAIEndpoint(adapter.openAIEndpoint)) {
       return `${prefix} 的 OpenAI 端点仅支持 /v1/responses、/v1/chat/completions 或以 / 开头的自定义路径`;
+    }
+    if (
+      adapter.type === "openai"
+      && adapter.codexOutboundEnabled
+      && adapter.openAIEndpoint === OPENAI_ENDPOINT_CUSTOM
+      && !adapter.baseURL.toLowerCase().endsWith("/responses")
+    ) {
+      return `${prefix} 启用 Codex 出站协议时，自定义接口地址必须以 /responses 结尾`;
     }
     if (adapter.type === "openai" && adapter.openAIExtraParamsEnabled) {
       const extraParamsError = validateOpenAIExtraParamsJSON(adapter.openAIExtraParamsJSON);

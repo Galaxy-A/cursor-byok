@@ -1,6 +1,7 @@
 claude-server.tar
 dist
 .task
+.tmp/
 bin
 logs/
 gen/

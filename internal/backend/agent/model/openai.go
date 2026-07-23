@@ -184,6 +184,9 @@ func openAIModelSupportsPromptCacheKey(modelID string) bool {
 }
 
 func openAIPromptCacheKey(req StreamRequest, modelID string) string {
+	if req.CodexOutboundEnabled {
+		return codexOutboundThreadID(req)
+	}
 	if !openAIModelSupportsPromptCacheKey(modelID) {
 		return ""
 	}
@@ -426,6 +429,9 @@ func (adapter *OpenAIAdapter) Stream(ctx context.Context, req StreamRequest, sin
 	if endpoint == "" {
 		return fmt.Errorf("openai endpoint is unsupported: %s", strings.TrimSpace(req.OpenAIEndpoint))
 	}
+	if req.CodexOutboundEnabled && modelchannel.OpenAIEndpointShape(endpoint) != "responses" {
+		return fmt.Errorf("Codex 出站协议仅支持 Responses API，请将接口端点设置为 /v1/responses 或完整的 /responses 地址")
+	}
 	req.OpenAIEndpoint = endpoint
 	if req.RequestKnobs != nil {
 		req.RequestKnobs["openai_endpoint"] = endpoint
@@ -498,7 +504,6 @@ func (adapter *OpenAIAdapter) streamChatCompletions(ctx context.Context, req Str
 
 	streamCtx, streamIdle := newProviderStreamIdleWatchdog(ctx, req.ProviderStreamIdleTimeout)
 	defer streamIdle.Stop()
-
 	buildHTTPRequest := func(requestContext context.Context) (*http.Request, error) {
 		httpReq, err := http.NewRequestWithContext(requestContext, http.MethodPost, requestURL, bytes.NewReader(payload))
 		if err != nil {
@@ -963,6 +968,7 @@ func (adapter *OpenAIAdapter) streamResponses(ctx context.Context, req StreamReq
 		recordLLMSummaryArtifact(req, buildLLMSummaryPayload(req, "openai", modelID, startedAt, time.Time{}, finishedAt, "", 0, 0, 0, 0, err))
 		return err
 	}
+	applyOpenAICodexOutboundBody(bodyMap, req)
 	body = bodyMap
 
 	requestURL := OpenAIEndpointURL(baseURL, req.OpenAIEndpoint)
@@ -977,6 +983,7 @@ func (adapter *OpenAIAdapter) streamResponses(ctx context.Context, req StreamReq
 
 	streamCtx, streamIdle := newProviderStreamIdleWatchdog(ctx, req.ProviderStreamIdleTimeout)
 	defer streamIdle.Stop()
+	codexIdentity := buildCodexOutboundIdentity(req)
 
 	buildHTTPRequest := func(requestContext context.Context) (*http.Request, error) {
 		httpReq, err := http.NewRequestWithContext(requestContext, http.MethodPost, requestURL, bytes.NewReader(payload))
@@ -986,6 +993,7 @@ func (adapter *OpenAIAdapter) streamResponses(ctx context.Context, req StreamReq
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("User-Agent", ClaudeCodeUserAgent)
+		applyOpenAICodexOutboundHeaders(httpReq, req, codexIdentity)
 		if err := ApplyCustomHeaders(httpReq, req.CustomHeadersEnabled, req.CustomHeadersJSON); err != nil {
 			return nil, err
 		}

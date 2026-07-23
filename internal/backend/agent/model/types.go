@@ -94,6 +94,8 @@ type StreamRequest struct {
 	ReasoningEffort string
 	// OpenAIEndpoint 表示 OpenAI 兼容 provider 使用的 API 端点。
 	OpenAIEndpoint string
+	// CodexOutboundEnabled 表示 OpenAI 请求是否使用 Codex CLI 出站协议。
+	CodexOutboundEnabled bool
 	// OpenAIExtraParamsEnabled 表示是否启用 OpenAI 额外请求参数。
 	OpenAIExtraParamsEnabled bool
 	// OpenAIExtraParamsJSON 表示 OpenAI 额外请求参数 JSON 对象。

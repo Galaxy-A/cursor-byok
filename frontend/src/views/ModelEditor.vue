@@ -3,6 +3,7 @@ import Button from "@/components/ui/Button.vue";
 import Input from "@/components/ui/Input.vue";
 import ModelAdapterTestCard from "@/components/ModelAdapterTestCard.vue";
 import Select from "@/components/ui/Select.vue";
+import Switch from "@/components/ui/Switch.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
 import { getModelEditorContext } from "@/services/clientApi";
 import {
@@ -132,6 +133,7 @@ const fieldTips = {
   reasoningEffort: "推理强度仅对部分支持 reasoning_effort 的模型生效，并不是所有模型都支持。越高通常越稳，但也可能更慢。",
   maxCompletionTokens: "单次回复允许生成的最大 Token 数。留空时使用默认值。",
   openAIEndpoint: "选择接口协议端点。选“自定义路径”时，请在接口地址栏填写完整请求地址（含 /chat/completions 或 /responses 路径后缀），系统会根据末段自动判断协议形态。",
+  codexOutbound: "开启后，Cursor助手会把该模型的 OpenAI 出站请求包装为 Codex CLI Responses 请求，包括 Codex 客户端标识、会话标识和工具调用格式。",
   openAIExtraParams: "开启后会把 JSON 对象覆盖到 OpenAI 请求体。同名字段以这里为准。OpenAI service_tier 支持 auto、default、flex、scale、priority。",
   customHeaders: "开启后会把 JSON 对象覆盖到最终请求头。同名请求头以这里为准，值必须是字符串。",
   anthropicExtraParams: "开启后会把 JSON 对象覆盖到 Anthropic 请求体。同名字段以这里为准。",
@@ -245,6 +247,24 @@ watch(
 watch(currentRequestHash, () => {
   localTestFailure.value = "";
 });
+
+watch(
+  () => draft.codexOutboundEnabled,
+  (enabled) => {
+    if (enabled && draft.openAIEndpoint !== OPENAI_ENDPOINT_CUSTOM) {
+      draft.openAIEndpoint = OPENAI_ENDPOINT_RESPONSES;
+    }
+  },
+);
+
+watch(
+  () => draft.openAIEndpoint,
+  (endpoint) => {
+    if (draft.codexOutboundEnabled && endpoint !== OPENAI_ENDPOINT_CUSTOM && endpoint !== OPENAI_ENDPOINT_RESPONSES) {
+      draft.openAIEndpoint = OPENAI_ENDPOINT_RESPONSES;
+    }
+  },
+);
 
 watch(
   () => draft.openAIExtraParamsEnabled,
@@ -446,6 +466,18 @@ onMounted(async () => {
               :options="openAIEndpointOptions"
             />
           </label>
+        </div>
+
+        <div v-if="draft.type === 'openai'" class="rounded-[8px] border border-[#343434] bg-[#252525] p-3">
+          <Switch
+            compact
+            label="启用 Codex 出站协议"
+            :description="fieldTips.codexOutbound"
+            enabled-text="已开启：使用 Codex CLI 出站协议"
+            disabled-text="已关闭：使用通用 OpenAI 出站协议"
+            :enabled="draft.codexOutboundEnabled"
+            @change="draft.codexOutboundEnabled = $event"
+          />
         </div>
 
         <div v-if="draft.type === 'openai'" class="rounded-[8px] border border-[#343434] bg-[#252525] p-3">
