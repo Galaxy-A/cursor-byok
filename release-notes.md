@@ -1,5 +1,3 @@
-QQ10群：1049354347
-----
 - 支持 GPT 5.6
 - OpenAI 模型配置新增 Codex 出站协议开关，支持将 Cursor 请求包装为 Codex CLI Responses 请求，并将响应转换回 Cursor 协议
 - Codex 出站模式支持客户端身份头、稳定会话标识、prompt cache key、reasoning summary 和工具调用请求字段

@@ -4,6 +4,10 @@
 
 <img  width="820"  alt="image" src="https://github.com/user-attachments/assets/a607be84-a738-4e33-9750-13352e74001c" />
 
+## 项目来源
+
+本仓库基于 [leookun/cursor-byok](https://github.com/leookun/cursor-byok) fork 并进行自用修改。原项目的作者署名、版权声明和许可证保持不变；本仓库新增功能及构建发布配置见提交记录。
+
 
 
 ## 为什么做这个项目
