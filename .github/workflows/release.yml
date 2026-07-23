@@ -43,16 +43,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: yarn
@@ -66,12 +66,14 @@ jobs:
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: |
+          brew untap aws/tap || true
+          brew install protobuf
 
       - name: Install Windows build dependencies
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install protoc zip --no-progress -y
+        run: choco install protoc --no-progress -y
 
       - name: Install project build tools
         shell: bash
@@ -99,7 +101,7 @@ jobs:
           cp "$source" artifacts/
 
       - name: Upload release asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           path: artifacts/*
@@ -113,16 +115,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Download release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: artifacts

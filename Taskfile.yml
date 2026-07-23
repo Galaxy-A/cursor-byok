@@ -233,7 +233,10 @@ tasks:
   release:ensure:dir:
     internal: true
     cmds:
-      - mkdir -p "{{.RELEASE_DIR}}"
+      - cmd: powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '{{.RELEASE_DIR}}' | Out-Null"
+        platforms: [windows]
+      - cmd: mkdir -p "{{.RELEASE_DIR}}"
+        platforms: [darwin, linux]
 
   release:notes:
     summary: 从 release-notes.md 生成当前版本的发布说明文件（README.md 仅用于公开仓库同步）
@@ -247,6 +250,8 @@ tasks:
       - go run ./scripts/release notes -config ./build/config.yml -out "{{.RELEASE_NOTES_PATH}}" -source "{{.RELEASE_SOURCE_PATH}}"
 
   release:build:macos:arm64:
+    deps:
+      - task: release:ensure:dir
     cmds:
       - task: darwin:package:archive
         vars:
@@ -258,6 +263,8 @@ tasks:
           SCAN: '{{.SCAN}}'
 
   release:build:macos:amd64:
+    deps:
+      - task: release:ensure:dir
     cmds:
       - task: darwin:package:archive
         vars:
@@ -269,6 +276,8 @@ tasks:
           SCAN: '{{.SCAN}}'
 
   release:build:windows:amd64:
+    deps:
+      - task: release:ensure:dir
     cmds:
       - task: windows:create:zip
         vars:
@@ -278,6 +287,8 @@ tasks:
           SCAN: '{{.SCAN}}'
 
   release:build:linux:amd64:
+    deps:
+      - task: release:ensure:dir
     cmds:
       - task: linux:package:archive
         vars:
@@ -289,6 +300,8 @@ tasks:
           SCAN: '{{.SCAN}}'
 
   release:build:linux:arm64:
+    deps:
+      - task: release:ensure:dir
     cmds:
       - task: linux:package:archive
         vars:

@@ -139,7 +139,10 @@ tasks:
     dir: '{{.BUILD_DIR}}'
     cmds:
       - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .
-      - rm -rf ios
+      - cmd: powershell -NoProfile -Command "if (Test-Path -LiteralPath 'ios') { Remove-Item -LiteralPath 'ios' -Recurse -Force }"
+        platforms: [windows]
+      - cmd: rm -rf ios
+        platforms: [darwin, linux]
 
   setup:docker:
     summary: 构建 Linux 交叉编译 Docker 镜像
