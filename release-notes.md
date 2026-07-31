@@ -3,6 +3,9 @@
 - Codex 出站模式支持客户端身份头、稳定会话标识、prompt cache key、reasoning summary 和工具调用请求字段
 - 增加 Codex 出站模式的 Responses 端点校验与 debug 日志排查说明
 - 修复一些bug
+-------0.0.42------
+- 修复grep或者read长时间阻塞问题 @liorxuan
+-------0.0.41------
 - 修复内存泄漏问题，该可能导致内存异常占用
 - 支持俄语增加翻译范围
 - 修复qwen-3.8-max中断问题(mimo也应该属于同一类问题)
