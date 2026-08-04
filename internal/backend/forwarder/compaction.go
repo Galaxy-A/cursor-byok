@@ -77,7 +77,7 @@ func (service *Service) maybeCompactBeforeProvider(stream *ActiveStream, convers
 	if service == nil || stream == nil || conversation == nil {
 		return false, nil
 	}
-	manualInstruction, manual := parseManualCompactionDirective(stream.LatestUserText)
+	manualInstruction, manual := streamManualCompactionDirective(stream)
 	plan, err := service.buildCompactionPlan(stream, conversation, compiled, manual, manualInstruction)
 	if err != nil {
 		return false, err
@@ -877,14 +877,49 @@ func (service *Service) resolveCompactionReserveTokens(modelID string) int64 {
 
 func parseManualCompactionDirective(latestUserText string) (string, bool) {
 	trimmed := strings.TrimSpace(latestUserText)
+	const directive = "/summarize"
 	switch {
-	case trimmed == "/compact":
+	case trimmed == directive:
 		return "", true
-	case strings.HasPrefix(trimmed, "/compact "):
-		return strings.TrimSpace(strings.TrimPrefix(trimmed, "/compact")), true
+	case strings.HasPrefix(trimmed, directive+" "):
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, directive)), true
 	default:
 		return "", false
 	}
+}
+
+func parseManualCompactionRequest(userMessage *agentv1.UserMessage) (string, bool) {
+	if userMessage == nil {
+		return "", false
+	}
+	if instruction, ok := parseManualCompactionDirective(userMessage.GetText()); ok {
+		return instruction, true
+	}
+	if strings.TrimSpace(userMessage.GetText()) != "" || userMessage.GetSelectedContext() == nil {
+		return "", false
+	}
+	for _, command := range userMessage.GetSelectedContext().GetCursorCommands() {
+		if command == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(command.GetName()), "glass-action-summarize") {
+			instruction, _ := parseManualCompactionDirective(command.GetContent())
+			return instruction, true
+		}
+	}
+	return "", false
+}
+
+func streamManualCompactionDirective(stream *ActiveStream) (string, bool) {
+	if stream == nil {
+		return "", false
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.ManualCompaction.Requested {
+		return strings.TrimSpace(stream.ManualCompaction.Instruction), true
+	}
+	return parseManualCompactionDirective(stream.LatestUserText)
 }
 
 func buildPreCompactHookRequest(stream *ActiveStream, plan *compactionPlan) *agentv1.ExecuteHookRequest {

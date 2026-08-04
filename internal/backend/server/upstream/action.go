@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -26,6 +27,32 @@ func DirectAction(deps Dependencies, cfg CompatRouteConfig) server.HandlerFunc {
 			return err
 		}
 		return handleDirect(reqCtx, route)
+	}
+}
+
+// AuthenticatedDirectAction restores the independent desktop account after
+// local-mode middleware has rewritten the request identity.
+func AuthenticatedDirectAction(deps Dependencies, cfg CompatRouteConfig, provider AuthorizationProvider) server.HandlerFunc {
+	return func(ctx *server.Context) error {
+		reqCtx, _, err := newCompatRouteObjects(ctx, deps, cfg)
+		if err != nil {
+			return err
+		}
+		if reqCtx == nil || reqCtx.Request == nil {
+			return fmt.Errorf("Cursor 控制面请求上下文无效")
+		}
+		if provider == nil {
+			return fmt.Errorf("Cursor 账号服务未初始化")
+		}
+		authorization, err := provider.Authorization(reqCtx.Request.Context())
+		if err != nil {
+			return err
+		}
+		_, err = ForwardToUpstream(reqCtx, ForwardOptions{PatchHeaders: func(headers http.Header) {
+			headers.Set("Authorization", authorization)
+			headers.Set("x-cursor-checksum", BuildCursorChecksum(authorization))
+		}})
+		return err
 	}
 }
 
@@ -165,6 +192,18 @@ func DefaultModelNudgeMockBuilder(reqCtx *RequestContext) (map[string]any, error
 	return buildDefaultModelNudgeDataPayload(reqCtx)
 }
 
+func UsableModelsMockBuilder(reqCtx *RequestContext) (map[string]any, error) {
+	return buildUsableModelsPayload(reqCtx)
+}
+
+func DefaultModelForCliMockBuilder(reqCtx *RequestContext) (map[string]any, error) {
+	return buildDefaultModelForCliPayload(reqCtx)
+}
+
+func DefaultModelMockBuilder(reqCtx *RequestContext) (map[string]any, error) {
+	return buildDefaultModelPayload(reqCtx)
+}
+
 func BootstrapStatsigMockBuilder(reqCtx *RequestContext) (map[string]any, error) {
 	return buildBootstrapStatsigPayload(reqCtx)
 }
@@ -183,6 +222,14 @@ func DashboardTeamsMockBuilder(reqCtx *RequestContext) (map[string]any, error) {
 
 func DashboardManagedSkillsMockBuilder(reqCtx *RequestContext) (map[string]any, error) {
 	return buildDashboardManagedSkillsPayload(reqCtx)
+}
+
+func EmptyMockBuilder(*RequestContext) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+func SubmitLogsMockBuilder(*RequestContext) (map[string]any, error) {
+	return map[string]any{"success": true}, nil
 }
 
 func DashboardGetMeMockBuilder(reqCtx *RequestContext) (map[string]any, error) {

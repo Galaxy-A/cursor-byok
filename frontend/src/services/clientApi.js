@@ -62,6 +62,30 @@ export function saveUserConfig(payload) {
   return withApiLogging("SaveUserConfig", payload, () => SaveUserConfig(payload));
 }
 
+export function getCursorAccountStatus() {
+  return withApiLogging("GetCursorAccountStatus", undefined, () =>
+    Call.ByName(
+      `${PROXY_SERVICE_NAME}.GetCursorAccountStatus`,
+    ).then((result) => result?.value ?? result),
+  );
+}
+
+export function startCursorAccountLogin() {
+  return withApiLogging("StartCursorAccountLogin", undefined, () =>
+    Call.ByName(
+      `${PROXY_SERVICE_NAME}.StartCursorAccountLogin`,
+    ).then((result) => result?.value ?? result),
+  );
+}
+
+export function disconnectCursorAccount() {
+  return withApiLogging("DisconnectCursorAccount", undefined, () =>
+    Call.ByName(
+      `${PROXY_SERVICE_NAME}.DisconnectCursorAccount`,
+    ).then((result) => result?.value ?? result),
+  );
+}
+
 export function getProxyState() {
   return withApiLogging("GetState", undefined, () => GetState());
 }

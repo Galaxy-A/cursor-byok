@@ -27,10 +27,11 @@ const healthPath = "/healthz"
 const tabServerBaseURL = "https://tab.leokun.cn"
 
 type Host struct {
-	store      *serverconfig.Store
-	listenAddr string
-	configs    *serverconfig.Manager
-	healthHTTP *http.Client
+	store            *serverconfig.Store
+	listenAddr       string
+	configs          *serverconfig.Manager
+	healthHTTP       *http.Client
+	controlPlaneAuth upstream.AuthorizationProvider
 
 	runMu      sync.RWMutex
 	httpServer *http.Server
@@ -40,7 +41,7 @@ type Host struct {
 	mux http.Handler
 }
 
-func NewHost(store *serverconfig.Store) (*Host, error) {
+func NewHost(store *serverconfig.Store, controlPlaneAuth upstream.AuthorizationProvider) (*Host, error) {
 	if store == nil {
 		return nil, fmt.Errorf("backend config store is required")
 	}
@@ -50,10 +51,11 @@ func NewHost(store *serverconfig.Store) (*Host, error) {
 	}
 	cfg := configs.Current()
 	host := &Host{
-		store:      store,
-		listenAddr: cfg.BackendListenAddr,
-		configs:    configs,
-		healthHTTP: newLoopbackHTTPClient(),
+		store:            store,
+		listenAddr:       cfg.BackendListenAddr,
+		configs:          configs,
+		healthHTTP:       newLoopbackHTTPClient(),
+		controlPlaneAuth: controlPlaneAuth,
 	}
 	if err := host.rebuild(cfg); err != nil {
 		return nil, err
@@ -330,6 +332,7 @@ func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 				Name: "server_config",
 			})),
 		),
+		mockedLocalProcedure("/aiserver.v1.ServerConfigService/GetServerConfig", "server_config_service_get_server_config", "aiserver.v1.GetServerConfigResponse", upstream.ServerConfigMockBuilder, routeDeps),
 		server.POST("/aiserver.v1.AiService/AvailableModels",
 			server.Name("available_models"),
 			server.ConnectUnary(),
@@ -343,6 +346,9 @@ func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 				Name: "available_models",
 			})),
 		),
+		mockedLocalProcedure("/aiserver.v1.AiService/GetUsableModels", "usable_models", "aiserver.v1.GetUsableModelsResponse", upstream.UsableModelsMockBuilder, routeDeps),
+		mockedLocalProcedure("/aiserver.v1.AiService/GetDefaultModelForCli", "default_model_for_cli", "aiserver.v1.GetDefaultModelForCliResponse", upstream.DefaultModelForCliMockBuilder, routeDeps),
+		mockedLocalProcedure("/aiserver.v1.AiService/GetDefaultModel", "default_model", "aiserver.v1.GetDefaultModelResponse", upstream.DefaultModelMockBuilder, routeDeps),
 		server.POST("/aiserver.v1.AiService/GetDefaultModelNudgeData",
 			server.Name("default_model_nudge"),
 			server.ConnectUnary(),
@@ -381,6 +387,14 @@ func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 			server.Upstream(upstream.DirectAction(routeDeps, upstream.CompatRouteConfig{
 				Name: "first_window_statsig_decision",
 			})),
+		),
+		mockedLocalProcedure("/aiserver.v1.AnalyticsService/SubmitLogs", "analytics_submit_logs", "aiserver.v1.SubmitLogsResponse", upstream.SubmitLogsMockBuilder, routeDeps),
+		mockedLocalProcedure("/aiserver.v1.AnalyticsService/TrackEvents", "analytics_track_events", "aiserver.v1.TrackEventsResponse", upstream.EmptyMockBuilder, routeDeps),
+		server.POST("/v1/traces",
+			server.Name("otlp_traces"),
+			server.HTTP(),
+			server.Local(upstream.FixedStatusAction(routeDeps, upstream.CompatRouteConfig{Name: "otlp_traces", StatusCode: http.StatusOK})),
+			server.Upstream(upstream.DirectAction(routeDeps, upstream.CompatRouteConfig{Name: "otlp_traces"})),
 		),
 		server.POST("/oauth/token",
 			server.Name("oauth_token"),
@@ -515,16 +529,20 @@ func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 		server.POST("/aiserver.v1.DashboardService/GetManagedSkills",
 			server.Name("dashboard_get_managed_skills"),
 			server.ConnectUnary(),
-			server.Local(upstream.MockProtoAction(routeDeps, upstream.CompatRouteConfig{
+			server.Local(cursorControlPlaneAction(host.controlPlaneAuth, routeDeps, "dashboard_get_managed_skills", upstream.MockProtoAction(routeDeps, upstream.CompatRouteConfig{
 				Name:          "dashboard_get_managed_skills",
 				StatusCode:    http.StatusOK,
 				MockProtoType: "aiserver.v1.GetManagedSkillsResponse",
 				MockBuilder:   upstream.DashboardManagedSkillsMockBuilder,
-			})),
-			server.Upstream(upstream.DirectAction(routeDeps, upstream.CompatRouteConfig{
+			}))),
+			server.Upstream(cursorControlPlaneAction(host.controlPlaneAuth, routeDeps, "dashboard_get_managed_skills", upstream.DirectAction(routeDeps, upstream.CompatRouteConfig{
 				Name: "dashboard_get_managed_skills",
-			})),
+			}))),
 		),
+		mockedLocalProcedure("/aiserver.v1.DashboardService/GetTeamAdminSettingsOrEmptyIfNotInTeam", "dashboard_get_team_admin_settings_or_empty", "aiserver.v1.GetTeamAdminSettingsResponse", upstream.EmptyMockBuilder, routeDeps),
+		mockedLocalProcedure("/aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam", "dashboard_get_team_repos_or_empty", "aiserver.v1.GetTeamReposResponse", upstream.EmptyMockBuilder, routeDeps),
+		mockedLocalProcedure("/aiserver.v1.DashboardService/GetGlobalCommands", "dashboard_get_global_commands", "aiserver.v1.GetGlobalCommandsResponse", upstream.EmptyMockBuilder, routeDeps),
+		mockedLocalProcedure("/aiserver.v1.DashboardService/GetCliDownloadUrl", "dashboard_get_cli_download_url", "aiserver.v1.GetCliDownloadUrlResponse", upstream.EmptyMockBuilder, routeDeps),
 		server.POST("/aiserver.v1.DashboardService/GetMe",
 			server.Name("dashboard_get_me"),
 			server.ConnectUnary(),
@@ -590,7 +608,24 @@ func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 				Name: "dashboard_is_on_new_pricing",
 			})),
 		),
-		// tabServerUpstreamProcedure("/aiserver.v1.DashboardService/GetEffectiveUserPlugins", "dashboard_get_effective_user_plugins", server.ConnectUnary(), routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/AddMarketplace", "dashboard_add_marketplace", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/AddMcpServersFromPlugin", "dashboard_add_mcp_servers_from_plugin", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/BatchGetPluginMcpConfig", "dashboard_batch_get_plugin_mcp_config", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/GetAvailableMcpServers", "dashboard_get_available_mcp_servers", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/GetEffectiveUserPlugins", "dashboard_get_effective_user_plugins", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/GetPlugin", "dashboard_get_plugin", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/GetPluginMcpConfig", "dashboard_get_plugin_mcp_config", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/InstallUserPlugin", "dashboard_install_user_plugin", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/ListMarketplacePlugins", "dashboard_list_marketplace_plugins", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/ListMarketplaces", "dashboard_list_marketplaces", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/ListUserPluginInstalls", "dashboard_list_user_plugin_installs", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/RefreshMarketplace", "dashboard_refresh_marketplace", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/RegisterMarketplaceAndPlugins", "dashboard_register_marketplace_and_plugins", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/RemoveMarketplace", "dashboard_remove_marketplace", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/ResolvePluginsByRef", "dashboard_resolve_plugins_by_ref", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/UninstallUserPlugin", "dashboard_uninstall_user_plugin", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.DashboardService/UpdateUserPluginInstall", "dashboard_update_user_plugin_install", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
+		cursorControlPlaneProcedure("/aiserver.v1.MCPRegistryService/GetKnownServers", "mcp_registry_get_known_servers", server.ConnectUnary(), host.controlPlaneAuth, routeDeps),
 		server.Any("/aiserver.v1.DashboardService/*",
 			server.Name("dashboard"),
 			server.HTTP(),
@@ -717,6 +752,21 @@ func directUpstreamProcedure(pattern string, name string, protocol server.RouteO
 	)
 }
 
+func mockedLocalProcedure(pattern string, name string, protoType string, builder func(*upstream.RequestContext) (map[string]any, error), deps upstream.Dependencies) server.Option {
+	config := upstream.CompatRouteConfig{
+		Name:          name,
+		StatusCode:    http.StatusOK,
+		MockProtoType: protoType,
+		MockBuilder:   builder,
+	}
+	return server.POST(pattern,
+		server.Name(name),
+		server.ConnectUnary(),
+		server.Local(upstream.MockProtoAction(deps, config)),
+		server.Upstream(upstream.DirectAction(deps, upstream.CompatRouteConfig{Name: name})),
+	)
+}
+
 func repositoryServiceProcedure(pattern string, name string, protocol server.RouteOption, module *forwarder.Module, deps upstream.Dependencies) server.Option {
 	localAction := server.HTTPHandlerAction(module.RepositoryServiceHandler)
 	upstreamAction := upstream.DirectAction(deps, upstream.CompatRouteConfig{Name: name})
@@ -760,6 +810,36 @@ func tabServerUpstreamProcedure(pattern string, name string, protocol server.Rou
 		server.Local(action),
 		server.Upstream(action),
 	)
+}
+
+func cursorControlPlaneProcedure(pattern string, name string, protocol server.RouteOption, provider upstream.AuthorizationProvider, deps upstream.Dependencies) server.Option {
+	notFound := func(ctx *server.Context) error {
+		http.NotFound(ctx.Writer, ctx.Request)
+		return nil
+	}
+	return server.POST(pattern,
+		server.Name(name),
+		protocol,
+		server.Local(cursorControlPlaneAction(provider, deps, name, notFound)),
+		server.Upstream(cursorControlPlaneAction(provider, deps, name, upstream.DirectAction(deps, upstream.CompatRouteConfig{Name: name}))),
+	)
+}
+
+func cursorControlPlaneAction(provider upstream.AuthorizationProvider, deps upstream.Dependencies, name string, fallback server.HandlerFunc) server.HandlerFunc {
+	direct := upstream.AuthenticatedDirectAction(deps, upstream.CompatRouteConfig{Name: name}, provider)
+	return func(ctx *server.Context) error {
+		if provider == nil || !provider.SignedIn() {
+			return fallback(ctx)
+		}
+		if ctx == nil || ctx.Request == nil || ctx.Request.URL == nil {
+			return fmt.Errorf("Cursor 控制面请求上下文无效")
+		}
+		targetURL := *ctx.Request.URL
+		targetURL.Scheme = "https"
+		targetURL.Host = "api2.cursor.sh:443"
+		ctx.UpstreamURL = &targetURL
+		return direct(ctx)
+	}
 }
 
 type serverSystemSettings struct {

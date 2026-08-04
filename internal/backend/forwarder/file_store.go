@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -438,7 +439,11 @@ func (store *ConversationFileStore) writeConversationLocked(conversationID strin
 	if err := store.writeContextLocked(conversationID, conversation); err != nil {
 		return err
 	}
-	return store.writeConversationMetaLocked(conversationID, conversation)
+	if err := store.writeConversationMetaLocked(conversationID, conversation); err != nil {
+		return err
+	}
+	store.syncCursorTranscriptBestEffort(conversationID, conversation)
+	return nil
 }
 
 func (store *ConversationFileStore) writeConversationMetaLocked(conversationID string, conversation *ConversationFile) error {
@@ -475,6 +480,55 @@ func (store *ConversationFileStore) writeContextLocked(conversationID string, co
 		Items:          append([]HistoryEntry(nil), conversation.Entries...),
 	}
 	return writeJSONFileAtomic(store.contextPath(conversationID), context)
+}
+
+func (store *ConversationFileStore) syncCursorTranscriptBestEffort(conversationID string, conversation *ConversationFile) {
+	if store == nil || conversation == nil {
+		return
+	}
+	folder := normalizeAgentTranscriptsFolder(conversation.AgentTranscriptsFolder)
+	if folder == "" {
+		return
+	}
+	if err := store.syncCursorTranscriptWithLatestStatus(conversationID, conversation, folder, false); err != nil {
+		log.Printf("forwarder transcript sync failed conversation_id=%s err=%v", strings.TrimSpace(conversationID), err)
+	}
+}
+
+func (store *ConversationFileStore) syncCursorTranscriptWithLatestStatus(conversationID string, conversation *ConversationFile, folder string, includeLatestStatus bool) error {
+	path, err := cursorTranscriptPath(folder, conversationID)
+	if err != nil {
+		return err
+	}
+	data, err := projectCursorTranscriptJSONLWithLatestStatus(conversation, includeLatestStatus)
+	if err != nil || len(data) == 0 {
+		return err
+	}
+	return writeCursorTranscriptAtomic(path, preserveCursorAppendedTurnEnded(path, data))
+}
+
+func (store *ConversationFileStore) SyncAllCursorTranscriptsBestEffort() {
+	if store == nil {
+		return
+	}
+	ids, err := store.ListConversationIDs()
+	if err != nil {
+		log.Printf("forwarder transcript backfill scan failed err=%v", err)
+		return
+	}
+	for _, id := range ids {
+		conversation, loadErr := store.LoadConversation(id)
+		if loadErr != nil || conversation == nil || conversation.AgentTranscriptsFolder == "" {
+			continue
+		}
+		info, statErr := os.Stat(conversation.AgentTranscriptsFolder)
+		if statErr != nil || !info.IsDir() {
+			continue
+		}
+		if syncErr := store.syncCursorTranscriptWithLatestStatus(id, conversation, conversation.AgentTranscriptsFolder, true); syncErr != nil {
+			log.Printf("forwarder transcript backfill failed conversation_id=%s err=%v", id, syncErr)
+		}
+	}
 }
 
 func contextVersionForEntries(entries []HistoryEntry) int64 {
@@ -663,6 +717,9 @@ func mergeConversationMetadata(target *ConversationFile, source *ConversationFil
 	target.ParentConversationID = strings.TrimSpace(source.ParentConversationID)
 	target.ParentToolCallID = strings.TrimSpace(source.ParentToolCallID)
 	target.SubagentTypeName = strings.TrimSpace(source.SubagentTypeName)
+	if folder := normalizeAgentTranscriptsFolder(source.AgentTranscriptsFolder); folder != "" {
+		target.AgentTranscriptsFolder = folder
+	}
 	if strings.TrimSpace(source.Mode) != "" {
 		target.Mode = strings.TrimSpace(source.Mode)
 	}
@@ -717,6 +774,10 @@ func normalizeLoadedConversation(conversationID string, conversation *Conversati
 	}
 	if conversation.Entries == nil {
 		conversation.Entries = make([]HistoryEntry, 0, 16)
+	}
+	conversation.AgentTranscriptsFolder = normalizeAgentTranscriptsFolder(conversation.AgentTranscriptsFolder)
+	if conversation.AgentTranscriptsFolder == "" {
+		conversation.AgentTranscriptsFolder = agentTranscriptsFolderFromEntries(conversation.Entries)
 	}
 	for _, entry := range conversation.Entries {
 		if entry.Seq >= conversation.NextEntrySeq {

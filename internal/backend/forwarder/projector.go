@@ -1274,6 +1274,38 @@ func restoreImportedReplayUserMessages(messages []promptengine.Message, imported
 	return messages
 }
 
+func restoreImportedReplayUserMessagesFromBlobs(messages []promptengine.Message, importedTurns [][]byte, blobs importedBlobStore) []promptengine.Message {
+	if len(messages) == 0 || len(importedTurns) == 0 {
+		return messages
+	}
+	cursor := 0
+	for _, rawTurn := range importedTurns {
+		turn, _, err := decodeImportedTurn(rawTurn, blobs)
+		if err != nil || turn == nil || turn.GetAgentConversationTurn() == nil {
+			continue
+		}
+		userMessage, err := decodeImportedUserMessage(turn.GetAgentConversationTurn().GetUserMessage(), blobs)
+		if err != nil {
+			continue
+		}
+		replay, ok := promptengine.BuildUserMessageReplayMessage(userMessage)
+		if !ok || len(replay.ContentParts) == 0 {
+			continue
+		}
+		for cursor < len(messages) {
+			if strings.TrimSpace(messages[cursor].Role) == "user" && strings.TrimSpace(messages[cursor].Content) == strings.TrimSpace(replay.Content) {
+				if len(messages[cursor].ContentParts) == 0 {
+					messages[cursor].ContentParts = replay.ContentParts
+				}
+				cursor++
+				break
+			}
+			cursor++
+		}
+	}
+	return messages
+}
+
 func isLegacyPlainWriteReplay(toolName string, hasStructuredToolCall bool) bool {
 	return !hasStructuredToolCall && strings.TrimSpace(toolName) == "Write"
 }

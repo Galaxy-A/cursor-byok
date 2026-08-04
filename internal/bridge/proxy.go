@@ -24,6 +24,9 @@ type ModelAdapterTestResult = client.ModelAdapterTestResult
 // ModelAdapterTestResultsPayload 定义测速结果事件载荷。
 type ModelAdapterTestResultsPayload = client.ModelAdapterTestResultsPayload
 
+// CursorAccountStatus is safe for display and never contains tokens.
+type CursorAccountStatus = client.CursorAccountStatus
+
 // LicenseActionRequest 定义了当前模块中的 LicenseActionRequest 类型。
 type LicenseActionRequest = client.LicenseActionRequest
 
@@ -89,6 +92,18 @@ func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
 // SaveUserConfig 用于处理与 SaveUserConfig 相关的逻辑。
 func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
 	return s.core.SaveUserConfig(cfg)
+}
+
+func (s *ProxyService) GetCursorAccountStatus() CursorAccountStatus {
+	return s.core.GetCursorAccountStatus()
+}
+
+func (s *ProxyService) StartCursorAccountLogin() (CursorAccountStatus, error) {
+	return s.core.StartCursorAccountLogin()
+}
+
+func (s *ProxyService) DisconnectCursorAccount() (CursorAccountStatus, error) {
+	return s.core.DisconnectCursorAccount()
 }
 
 // TestModelAdapter 用于处理与 TestModelAdapter 相关的逻辑。

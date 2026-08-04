@@ -1,3 +1,9 @@
+- 手工适配上游 0.0.43/0.0.44：支持 commands、对话总结、Fork/关联对话、Cursor 历史同步和 cursor-agent CLI 本地模式接口
+- 修复 MiniMax thinking 参数兼容，并改用 agentv1 返回 CLI 模型详情
+- 新增独立 Cursor 控制面账号登录，支持插件市场、Skills 与 MCP Registry，不影响 Cursor 客户端当前账号
+- 新增独立 Cursor 协议调试器，可通过 task proxy-debugger 启动
+- 客户端更新检查、下载和安装改为使用 Galaxy-A/cursor-byok 的定制版 Releases
+-------0.0.44------
 - 支持 GPT 5.6
 - OpenAI 模型配置新增 Codex 出站协议开关，支持将 Cursor 请求包装为 Codex CLI Responses 请求，并将响应转换回 Cursor 协议
 - Codex 出站模式支持客户端身份头、稳定会话标识、prompt cache key、reasoning summary 和工具调用请求字段

@@ -62,6 +62,40 @@ func buildUserReplayMessage(text string, selectedContext *agentv1.SelectedContex
 	}, true
 }
 
+// BuildSelectedCursorCommandsReplayMessage keeps newly received command content
+// as a separate append-only history item so older user entries retain their meaning.
+func BuildSelectedCursorCommandsReplayMessage(userMessage *agentv1.UserMessage) (Message, bool) {
+	if userMessage == nil {
+		return Message{}, false
+	}
+	content := buildSelectedCursorCommandsPromptSection(userMessage.GetSelectedContext())
+	if content == "" {
+		return Message{}, false
+	}
+	return Message{Role: "user", Content: content}, true
+}
+
+func buildSelectedCursorCommandsPromptSection(selectedContext *agentv1.SelectedContext) string {
+	if selectedContext == nil || len(selectedContext.GetCursorCommands()) == 0 {
+		return ""
+	}
+	commands := make([]string, 0, len(selectedContext.GetCursorCommands()))
+	for _, command := range selectedContext.GetCursorCommands() {
+		if command == nil || strings.TrimSpace(command.GetContent()) == "" {
+			continue
+		}
+		name := strings.TrimSpace(command.GetName())
+		if name == "" {
+			name = "cursor-command"
+		}
+		commands = append(commands, fmt.Sprintf("<cursor_command name=\"%s\">\n%s\n</cursor_command>", escapePromptXML(name), command.GetContent()))
+	}
+	if len(commands) == 0 {
+		return ""
+	}
+	return "<cursor_commands>\n" + strings.Join(commands, "\n\n") + "\n</cursor_commands>"
+}
+
 func buildSelectedIDEStatePromptSection(selectedContext *agentv1.SelectedContext) string {
 	if selectedContext == nil || selectedContext.GetInvocationContext() == nil {
 		return ""
