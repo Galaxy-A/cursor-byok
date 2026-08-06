@@ -859,9 +859,7 @@ func (service *Service) handleCancelIntent(intent InboundIntent) error {
 		})
 	}
 	if hasCheckpoint {
-		if err := service.publishCheckpoint(stream.RequestID, stream.ConversationID); err != nil {
-			return err
-		}
+		service.discardPendingCheckpoint(stream, "checkpoint superseded by cancellation")
 	}
 	clearPendingProviderCompletion(stream)
 	stream.mu.Lock()
@@ -2123,9 +2121,15 @@ func (service *Service) completeSuccessfulTurn(stream *ActiveStream, completion 
 			err,
 		)
 	}
-	if err := service.publishCheckpoint(requestID, conversationID); err != nil {
-		return err
+	return service.publishCheckpointWithCompletion(requestID, conversationID, &completion)
+}
+
+func (service *Service) finishSuccessfulTurnAfterCheckpoint(stream *ActiveStream, completion pendingTurnCompletion) error {
+	if stream == nil {
+		return nil
 	}
+	requestID := firstNonEmpty(strings.TrimSpace(completion.RequestID), strings.TrimSpace(stream.RequestID))
+	usage := completion.Usage
 	if err := service.broker.Publish(requestID, StreamEvent{
 		Message: buildTurnEndedMessage(usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens),
 	}); err != nil {
@@ -2152,7 +2156,11 @@ func (service *Service) failStreamIfNonTerminal(stream *ActiveStream, terminalCo
 }
 
 // publishCheckpoint 按当前内存会话镜像投影出 checkpoint，并广播给所有 RunSSE 订阅者。
-func (service *Service) publishCheckpoint(requestID string, _ string) error {
+func (service *Service) publishCheckpoint(requestID string, conversationID string) error {
+	return service.publishCheckpointWithCompletion(requestID, conversationID, nil)
+}
+
+func (service *Service) publishCheckpointWithCompletion(requestID string, _ string, completion *pendingTurnCompletion) error {
 	stream, ok := service.broker.Get(requestID)
 	if !ok || stream == nil {
 		return fmt.Errorf("request is not active: %s", requestID)
@@ -2161,15 +2169,16 @@ func (service *Service) publishCheckpoint(requestID string, _ string) error {
 	if err != nil {
 		return err
 	}
-	state, err := service.projector.ProjectLegacyCheckpoint(conversation)
+	projection, err := service.projector.ProjectCheckpointProjection(conversation)
 	if err != nil {
 		return err
 	}
-	state.PendingToolCalls = buildPendingToolCalls(pendingExecs, pendingInteractions)
-	service.rewriteCheckpointTokenDetailsForClient(stream, conversation, state)
-	return service.broker.Publish(requestID, StreamEvent{
-		Message: buildCheckpointMessage(state),
-	})
+	if projection == nil || projection.State == nil {
+		return fmt.Errorf("checkpoint projection is empty")
+	}
+	projection.State.PendingToolCalls = buildPendingToolCalls(pendingExecs, pendingInteractions)
+	service.rewriteCheckpointTokenDetailsForClient(stream, conversation, projection.State)
+	return service.queueCheckpointProjection(stream, projection, completion)
 }
 
 func (service *Service) rewriteCheckpointTokenDetailsForClient(stream *ActiveStream, conversation *ConversationFile, state *agentv1.ConversationStateStructure) {

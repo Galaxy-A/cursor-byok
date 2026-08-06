@@ -17,6 +17,7 @@ import {
   startProxyService,
   stopProxyService,
   testModelAdapter,
+  fetchModelAdapterModels,
 } from "@/services/clientApi";
 
 const APP_STATE_STORAGE_KEY = "cursor-client:runtime-state:v2";
@@ -63,6 +64,100 @@ function asString(value) {
     return String(value);
   }
   return "";
+}
+
+export async function fetchAvailableModelIDs(payload) {
+  const result = await fetchModelAdapterModels(payload);
+  return asArray(result?.models)
+    .map((item) => asString(item))
+    .filter(Boolean);
+}
+
+function buildPrefixedModelDisplayName(prefix, modelID) {
+  const normalizedPrefix = asString(prefix) || "模型";
+  return `${normalizedPrefix}-${asString(modelID)}`;
+}
+
+export function buildModelAdaptersFromModelIDs(source, modelIDs, prefix) {
+  const base = normalizeModelAdapter(source);
+  const seen = new Set();
+  return asArray(modelIDs)
+    .map((item) => asString(item))
+    .filter((modelID) => {
+      if (!modelID || seen.has(modelID)) {
+        return false;
+      }
+      seen.add(modelID);
+      return true;
+    })
+    .map((modelID) => normalizeModelAdapter({
+      ...base,
+      id: "",
+      modelID,
+      displayName: buildPrefixedModelDisplayName(prefix, modelID),
+      tooltipData: base.tooltipData || "备注",
+    }));
+}
+
+function findModelAdapterUpsertIndex(adapters, target) {
+  return adapters.findIndex((adapter) => {
+    const current = normalizeModelAdapter(adapter);
+    return current.type === target.type
+      && normalizeBaseURL(current.baseURL) === normalizeBaseURL(target.baseURL)
+      && current.apiKey === target.apiKey
+      && current.modelID === target.modelID
+      && current.displayName === target.displayName
+      && (current.type !== "openai" || current.openAIEndpoint === target.openAIEndpoint);
+  });
+}
+
+export async function saveModelAdaptersFromModelIDs(source, modelIDs, prefix, selectedModelID = "") {
+  const generatedAdapters = buildModelAdaptersFromModelIDs(source, modelIDs, prefix);
+  if (generatedAdapters.length === 0) {
+    return { ok: false, error: "没有可保存的模型" };
+  }
+
+  const generatedError = validateModelAdapters(generatedAdapters);
+  if (generatedError) {
+    return { ok: false, error: generatedError };
+  }
+
+  const currentConfig = await loadPersistedUserConfig();
+  const nextAdapters = normalizeModelAdapters(currentConfig.modelAdapters);
+  const targetModelID = asString(selectedModelID) || generatedAdapters[0]?.modelID || "";
+  let selectedIndex = -1;
+
+  for (const adapter of generatedAdapters) {
+    const index = findModelAdapterUpsertIndex(nextAdapters, adapter);
+    if (index >= 0) {
+      nextAdapters.splice(index, 1, adapter);
+      if (selectedIndex < 0 && adapter.modelID === targetModelID) {
+        selectedIndex = index;
+      }
+      continue;
+    }
+    nextAdapters.push(adapter);
+    if (selectedIndex < 0 && adapter.modelID === targetModelID) {
+      selectedIndex = nextAdapters.length - 1;
+    }
+  }
+
+  const result = await persistConfigPayload(
+    {
+      ...currentConfig,
+      modelAdapters: nextAdapters,
+    },
+    { modelAdaptersOnly: true },
+  );
+  if (!result.ok) {
+    return result;
+  }
+  return {
+    ...result,
+    index: selectedIndex,
+    adapter: selectedIndex >= 0 ? appState.modelAdapters[selectedIndex] ?? null : null,
+    count: generatedAdapters.length,
+  };
 }
 
 function asBoolean(value, fallback = false) {

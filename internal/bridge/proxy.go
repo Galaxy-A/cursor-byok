@@ -21,6 +21,10 @@ type ModelAdapterConfig = serverconfig.ModelAdapterConfig
 // ModelAdapterTestResult 定义一次模型测速结果。
 type ModelAdapterTestResult = client.ModelAdapterTestResult
 
+type ModelAdapterModelsRequest = client.ModelAdapterModelsRequest
+
+type ModelAdapterModelsResult = client.ModelAdapterModelsResult
+
 // ModelAdapterTestResultsPayload 定义测速结果事件载荷。
 type ModelAdapterTestResultsPayload = client.ModelAdapterTestResultsPayload
 
@@ -114,6 +118,10 @@ func (s *ProxyService) TestModelAdapter(adapter ModelAdapterConfig) (ModelAdapte
 // GetModelAdapterTestResults 用于处理与 GetModelAdapterTestResults 相关的逻辑。
 func (s *ProxyService) GetModelAdapterTestResults() []ModelAdapterTestResult {
 	return s.core.GetModelAdapterTestResults()
+}
+
+func (s *ProxyService) FetchModelAdapterModels(input ModelAdapterModelsRequest) (ModelAdapterModelsResult, error) {
+	return s.core.FetchModelAdapterModels(input)
 }
 
 // GetDeviceID 用于处理与 GetDeviceID 相关的逻辑。

@@ -1,3 +1,8 @@
+- 手工适配上游 0.0.45：修复 Windows VDI WebView 白屏，支持远程模型列表、多选和批量保存
+- 重构 checkpoint blob 同步：客户端确认 blob 后再发布 checkpoint，并在同步完成后结束 turn；同步失败不丢失已完成对话
+- 保留定制历史事实源、append-only replay、provider pass 隔离、Codex outbound 配置和 Fork 父上下文导入
+- 移除首页中转服务推荐区域及对应的前端广告加载入口
+-------0.0.45------
 - 手工适配上游 0.0.43/0.0.44：支持 commands、对话总结、Fork/关联对话、Cursor 历史同步和 cursor-agent CLI 本地模式接口
 - 修复 MiniMax thinking 参数兼容，并改用 agentv1 返回 CLI 模型详情
 - 新增独立 Cursor 控制面账号登录，支持插件市场、Skills 与 MCP Registry，不影响 Cursor 客户端当前账号

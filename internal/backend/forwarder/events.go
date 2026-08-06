@@ -26,6 +26,22 @@ func buildHeartbeatMessage() *agentv1.AgentServerMessage {
 	}
 }
 
+func buildSetCheckpointBlobMessage(id uint32, blob CheckpointBlob) *agentv1.AgentServerMessage {
+	return &agentv1.AgentServerMessage{
+		Message: &agentv1.AgentServerMessage_KvServerMessage{
+			KvServerMessage: &agentv1.KvServerMessage{
+				Id: id,
+				Message: &agentv1.KvServerMessage_SetBlobArgs{
+					SetBlobArgs: &agentv1.SetBlobArgs{
+						BlobId:   append([]byte(nil), blob.ID...),
+						BlobData: append([]byte(nil), blob.Data...),
+					},
+				},
+			},
+		},
+	}
+}
+
 // buildTextDeltaMessage 构造文本增量消息。
 func buildTextDeltaMessage(text string) *agentv1.AgentServerMessage {
 	return &agentv1.AgentServerMessage{
