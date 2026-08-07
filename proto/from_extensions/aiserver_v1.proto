@@ -9859,6 +9859,27 @@ enum ForceBackgroundSubagentStatus {
   FORCE_BACKGROUND_SUBAGENT_STATUS_NOT_FOUND = 2;
 }
 
+enum ForkBackgroundComposerMode {
+  FORK_BACKGROUND_COMPOSER_MODE_UNSPECIFIED = 0;
+  FORK_BACKGROUND_COMPOSER_MODE_CONVERSATION = 1;
+  FORK_BACKGROUND_COMPOSER_MODE_POD = 2;
+}
+
+message ForkBackgroundComposerRequest {
+  string source_bc_id = 1;
+  ForkBackgroundComposerMode mode = 2;
+  optional string name = 3;
+  optional uint32 turn_count = 4;
+}
+
+message ForkBackgroundComposerResponse {
+  BackgroundComposer composer = 1;
+  string bc_id = 2;
+  string source_bc_id = 3;
+  ForkBackgroundComposerMode mode = 4;
+  optional string initial_run_id = 5;
+}
+
 // Copied from: local:aiserver.v1.FullCommitNotes (var: aa)
 message FullCommitNotes {
   repeated CommitNote notes = 1;
@@ -30235,6 +30256,7 @@ service BackgroundComposerService {
   rpc AttachBackgroundComposerLogs(AttachBackgroundComposerLogsRequest) returns (stream AttachBackgroundComposerLogsResponse) {}
   rpc AttachAgentStartupTrace(AttachAgentStartupTraceRequest) returns (stream AttachAgentStartupTraceResponse) {}
   rpc StartBackgroundComposerFromSnapshot(StartBackgroundComposerFromSnapshotRequest) returns (StartBackgroundComposerFromSnapshotResponse) {}
+  rpc ForkBackgroundComposer(ForkBackgroundComposerRequest) returns (ForkBackgroundComposerResponse) {}
   rpc MakePRBackgroundComposer(MakePRBackgroundComposerRequest) returns (MakePRBackgroundComposerResponse) {}
   rpc OpenPRBackgroundComposer(OpenPRBackgroundComposerRequest) returns (OpenPRBackgroundComposerResponse) {}
   rpc GetBackgroundComposerStatus(GetBackgroundComposerStatusRequest) returns (GetBackgroundComposerStatusResponse) {}

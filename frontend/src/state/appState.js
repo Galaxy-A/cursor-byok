@@ -357,6 +357,7 @@ function normalizeModelAdapterTestResults(source) {
 export function createEmptyModelAdapter() {
   return {
     id: "",
+    sort: 0,
     displayName: "",
     type: "openai",
     baseURL: "",
@@ -468,6 +469,7 @@ export function normalizeModelAdapter(source) {
     : "";
   return {
     id: asString(raw.id),
+    sort: asPositiveInteger(raw.sort),
     displayName: asString(raw.displayName || raw.name),
     type: SUPPORTED_MODEL_ADAPTER_TYPES.has(normalizedType) ? normalizedType : "",
     baseURL: normalizeBaseURL(raw.baseURL || raw.url),
@@ -510,7 +512,29 @@ export function normalizeModelAdapter(source) {
 }
 
 export function normalizeModelAdapters(source) {
-  return asArray(source).map((item) => normalizeModelAdapter(item));
+  return asArray(source)
+    .map((item, sourceIndex) => ({
+      adapter: normalizeModelAdapter(item),
+      sourceIndex,
+    }))
+    .sort((left, right) => {
+      const leftSort = left.adapter.sort;
+      const rightSort = right.adapter.sort;
+      if (leftSort <= 0 && rightSort <= 0) {
+        return left.sourceIndex - right.sourceIndex;
+      }
+      if (leftSort <= 0) {
+        return 1;
+      }
+      if (rightSort <= 0) {
+        return -1;
+      }
+      return leftSort - rightSort || left.sourceIndex - right.sourceIndex;
+    })
+    .map(({ adapter }, index) => ({
+      ...adapter,
+      sort: index + 1,
+    }));
 }
 
 export function validateModelAdapters(source) {
@@ -1317,6 +1341,39 @@ export async function deleteModelAdapterAt(index) {
 
   nextAdapters.splice(index, 1);
 
+  return persistConfigPayload(
+    {
+      ...currentConfig,
+      modelAdapters: nextAdapters,
+    },
+    { modelAdaptersOnly: true },
+  );
+}
+
+export async function saveModelAdapterOrder(adapterIDs) {
+  const orderedIDs = asArray(adapterIDs)
+    .map((item) => asString(item))
+    .filter(Boolean);
+  const currentConfig = await loadPersistedUserConfig();
+  const currentAdapters = normalizeModelAdapters(currentConfig.modelAdapters);
+  const adaptersByID = new Map(currentAdapters.map((adapter) => [adapter.id, adapter]));
+  const uniqueIDs = new Set(orderedIDs);
+
+  if (
+    orderedIDs.length !== currentAdapters.length
+    || uniqueIDs.size !== currentAdapters.length
+    || orderedIDs.some((id) => !adaptersByID.has(id))
+  ) {
+    return {
+      ok: false,
+      error: "模型配置已发生变化，请刷新后重试",
+    };
+  }
+
+  const nextAdapters = orderedIDs.map((id, index) => ({
+    ...adaptersByID.get(id),
+    sort: index + 1,
+  }));
   return persistConfigPayload(
     {
       ...currentConfig,

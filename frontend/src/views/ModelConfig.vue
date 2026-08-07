@@ -3,6 +3,7 @@ import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
 import ModelAdapterTestCard from "@/components/ModelAdapterTestCard.vue";
 import { showModal } from "@/composables/useModal";
+import Sortable from "sortablejs";
 import {
   appState,
   createEmptyModelAdapter,
@@ -12,29 +13,37 @@ import {
   openModelEditorWindow,
   reloadUserConfig,
   runModelAdapterTest,
+  saveModelAdapterOrder,
   startModelAdapterTest,
   toUserError,
 } from "@/state/appState";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const BATCH_TEST_CONCURRENCY = 10;
 
 const typeTabs = [
+  { label: "全部", value: "all", icon: "icon-[mdi--view-grid-outline]" },
   { label: "OpenAI", value: "openai", icon: "icon-[bxl--openai]" },
   { label: "Anthropic", value: "anthropic", icon: "icon-[logos--claude-icon]" },
 ];
 
-const activeType = ref("openai");
+const activeType = ref("all");
 const batchTesting = ref(false);
 const batchStopping = ref(false);
 const batchTotal = ref(0);
 const batchCompleted = ref(0);
+const modelGrid = ref(null);
+const sortSaving = ref(false);
 const batchActiveCalls = new Set();
 let batchStopRequested = false;
+let sortable = null;
 
-const filteredAdapters = computed(() =>
-  appState.modelAdapters.filter((adapter) => adapter.type === activeType.value),
-);
+const filteredAdapters = computed(() => (
+  activeType.value === "all"
+    ? appState.modelAdapters
+    : appState.modelAdapters.filter((adapter) => adapter.type === activeType.value)
+));
+const filteredAdapterOrderKey = computed(() => filteredAdapters.value.map((adapter) => adapter.id).join("\n"));
 const batchButtonText = computed(() => {
   if (batchStopping.value) {
     return "停止中...";
@@ -48,11 +57,10 @@ const batchButtonText = computed(() => {
 watch(
   () => appState.modelAdapters,
   (adapters) => {
-    if (adapters.some((adapter) => adapter.type === activeType.value)) {
+    if (activeType.value === "all" || adapters.some((adapter) => adapter.type === activeType.value)) {
       return;
     }
-    const fallback = typeTabs.find((tab) => adapters.some((adapter) => adapter.type === tab.value));
-    activeType.value = fallback?.value ?? "openai";
+    activeType.value = "all";
   },
   { deep: true, immediate: true },
 );
@@ -97,7 +105,7 @@ async function openEditor(index = -1) {
     ? appState.modelAdapters[index]
     : {
         ...createEmptyModelAdapter(),
-        type: activeType.value,
+        type: activeType.value === "anthropic" ? "anthropic" : "openai",
       };
   try {
     await openModelEditorWindow(index, adapter);
@@ -105,6 +113,92 @@ async function openEditor(index = -1) {
     await showActionError("打开失败", toUserError(error));
   }
 }
+
+function destroySortable() {
+  if (sortable) {
+    sortable.destroy();
+    sortable = null;
+  }
+}
+
+function syncSortable() {
+  const element = modelGrid.value;
+  if (!element) {
+    destroySortable();
+    return;
+  }
+  if (!sortable || sortable.el !== element) {
+    destroySortable();
+    sortable = Sortable.create(element, {
+      animation: 160,
+      dataIdAttr: "data-model-id",
+      draggable: ".model-sort-item",
+      handle: ".model-sort-handle",
+      ghostClass: "opacity-40",
+      chosenClass: "!border-[#10AD5D]",
+      onEnd: (event) => {
+        void handleModelSort(event);
+      },
+    });
+  }
+  sortable.option("disabled", sortSaving.value || appState.configSaving || batchTesting.value);
+  sortable.sort(filteredAdapters.value.map((adapter) => adapter.id), false);
+}
+
+async function handleModelSort(event) {
+  const oldIndex = event.oldDraggableIndex ?? event.oldIndex;
+  const newIndex = event.newDraggableIndex ?? event.newIndex;
+  if (!Number.isInteger(oldIndex) || !Number.isInteger(newIndex) || oldIndex === newIndex) {
+    syncSortable();
+    return;
+  }
+
+  const reordered = filteredAdapters.value.slice();
+  const [moved] = reordered.splice(oldIndex, 1);
+  if (!moved || newIndex < 0 || newIndex > reordered.length) {
+    syncSortable();
+    return;
+  }
+  reordered.splice(newIndex, 0, moved);
+
+  const previousAdapters = appState.modelAdapters.slice();
+  let nextAdapters = reordered;
+  if (activeType.value !== "all") {
+    let typeIndex = 0;
+    nextAdapters = previousAdapters.map((adapter) => {
+      if (adapter.type !== activeType.value) {
+        return adapter;
+      }
+      const nextAdapter = reordered[typeIndex];
+      typeIndex += 1;
+      return nextAdapter;
+    });
+  }
+  nextAdapters = nextAdapters.map((adapter, index) => ({ ...adapter, sort: index + 1 }));
+
+  sortSaving.value = true;
+  appState.modelAdapters = nextAdapters;
+  try {
+    const result = await saveModelAdapterOrder(nextAdapters.map((adapter) => adapter.id));
+    if (!result.ok) {
+      appState.modelAdapters = previousAdapters;
+      await showActionError("排序失败", result.error);
+    }
+  } catch (error) {
+    appState.modelAdapters = previousAdapters;
+    await showActionError("排序失败", toUserError(error));
+  } finally {
+    sortSaving.value = false;
+    await nextTick();
+    syncSortable();
+  }
+}
+
+watch(
+  () => [modelGrid.value, activeType.value, filteredAdapterOrderKey.value, appState.configSaving, batchTesting.value],
+  () => { void nextTick().then(syncSortable); },
+  { flush: "post" },
+);
 
 async function handleDeleteModelAdapter(index) {
   const target = appState.modelAdapters[index];
@@ -211,10 +305,13 @@ async function handleTestAllModelAdapters() {
 
 onMounted(async () => {
   await reloadUserConfig({ modelAdaptersOnly: true }).catch(() => { });
+  await nextTick();
+  syncSortable();
 });
 
 onBeforeUnmount(() => {
   void stopBatchTesting();
+  destroySortable();
 });
 </script>
 
@@ -240,12 +337,12 @@ onBeforeUnmount(() => {
         <div class="center-row gap-2">
           <Button
             variant="default"
-            :disabled="appState.configSaving || (!batchTesting && filteredAdapters.length === 0)"
+            :disabled="sortSaving || appState.configSaving || (!batchTesting && filteredAdapters.length === 0)"
             @click="handleTestAllModelAdapters"
           >
             {{ batchButtonText }}
           </Button>
-          <Button variant="primary" :disabled="appState.configSaving || batchTesting" @click="openEditor()">新增模型</Button>
+          <Button variant="primary" :disabled="sortSaving || appState.configSaving || batchTesting" @click="openEditor()">新增模型</Button>
         </div>
       </div>
     </div>
@@ -253,15 +350,27 @@ onBeforeUnmount(() => {
     <div class="min-h-0 flex-1">
       <div v-if="filteredAdapters.length === 0"
         class="flex h-full min-h-[220px] items-center justify-center rounded-[8px] border border-dashed border-[#3a3a3a] bg-[#232323] px-4 text-sm text-[#a3a3a3]">
-        当前还没有配置任何 {{ typeLabel(activeType) }} 模型。
+        {{ activeType === "all" ? "当前还没有配置任何模型。" : `当前还没有配置任何 ${typeLabel(activeType)} 模型。` }}
       </div>
 
       <div v-else class="h-full min-h-0 overflow-y-auto pr-1">
-        <div class="grid gap-3 pb-1 [grid-template-columns:repeat(auto-fill,minmax(250px,1fr))]">
+        <div ref="modelGrid" class="grid gap-3 pb-1 [grid-template-columns:repeat(auto-fill,minmax(250px,1fr))]">
           <Card
             v-for="(adapter, index) in filteredAdapters"
             :key="adapter.id || `${adapter.baseURL}-${adapter.modelID}-${index}`"
+            class="model-sort-item group relative"
+            :data-model-id="adapter.id"
           >
+            <button
+              type="button"
+              class="model-sort-handle absolute left-2 top-2 z-10 flex h-[30px] w-[30px] touch-none cursor-grab items-center justify-center rounded-[6px] border border-[#454545] bg-[#303030] text-[#d4d4d4] opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
+              :disabled="sortSaving || appState.configSaving || batchTesting"
+              aria-label="拖拽排序"
+              title="拖拽排序"
+              @click.stop
+            >
+              <span class="icon-[icon-park-outline--drag] text-[18px]"></span>
+            </button>
             <div class="flex h-full min-h-[154px] flex-col justify-between gap-3">
               <div class="flex flex-col gap-2.5">
                 <div class="flex items-start justify-between gap-3">
@@ -303,14 +412,14 @@ onBeforeUnmount(() => {
               <div class="center-row flex-wrap justify-end gap-2 border-t border-[#343434] pt-3">
                 <Button
                   variant="default"
-                  :disabled="appState.configSaving || batchTesting || isAdapterTesting(adapter)"
+                  :disabled="sortSaving || appState.configSaving || batchTesting || isAdapterTesting(adapter)"
                   @click="handleTestModelAdapter(adapter)"
                 >
                   {{ isAdapterTesting(adapter) ? "测试中..." : "测试" }}
                 </Button>
-                <Button variant="default" :disabled="appState.configSaving" @click="openEditor(appState.modelAdapters.indexOf(adapter))">编辑</Button>
-                <Button variant="default" :disabled="appState.configSaving" @click="handleDuplicateModelAdapter(appState.modelAdapters.indexOf(adapter))">复制</Button>
-                <Button variant="text" :disabled="appState.configSaving"
+                <Button variant="default" :disabled="sortSaving || appState.configSaving" @click="openEditor(appState.modelAdapters.indexOf(adapter))">编辑</Button>
+                <Button variant="default" :disabled="sortSaving || appState.configSaving" @click="handleDuplicateModelAdapter(appState.modelAdapters.indexOf(adapter))">复制</Button>
+                <Button variant="text" :disabled="sortSaving || appState.configSaving"
                   @click="handleDeleteModelAdapter(appState.modelAdapters.indexOf(adapter))">删除</Button>
               </div>
             </div>

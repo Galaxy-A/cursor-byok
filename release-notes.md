@@ -1,3 +1,9 @@
+- 手工适配上游 0.0.46：修复 checkpoint 与 Fork Chat 的恢复衔接
+- 修复打断对话时已生成上下文丢失，并保持 append-only 历史与 provider pass 隔离
+- 支持拖动模型排序并持久化顺序，保留一键拉取模型和 Codex outbound 配置
+- 兼容部分非主流 Chat Completions 端点的空 finish_reason
+- 协议调试器支持筛选和解码 Fork 相关流量
+-------0.0.46------
 - 手工适配上游 0.0.45：修复 Windows VDI WebView 白屏，支持远程模型列表、多选和批量保存
 - 重构 checkpoint blob 同步：客户端确认 blob 后再发布 checkpoint，并在同步完成后结束 turn；同步失败不丢失已完成对话
 - 保留定制历史事实源、append-only replay、provider pass 隔离、Codex outbound 配置和 Fork 父上下文导入
