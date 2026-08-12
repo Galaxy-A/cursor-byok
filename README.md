@@ -8,6 +8,12 @@
 
 本仓库基于 [leookun/cursor-byok](https://github.com/leookun/cursor-byok) fork 并进行自用修改。原项目的作者署名、版权声明和许可证保持不变；本仓库新增功能及构建发布配置见提交记录。
 
+本项目是非官方社区项目，与 Anysphere 或 Cursor 官方不存在隶属、赞助或背书关系。Cursor 名称及相关商标归其权利人所有。
+
+项目源码按照根目录 [LICENSE](LICENSE) 中的 MIT 许可证发布。发布包同时包含项目许可证以及 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) 中列出的第三方软件声明和许可证。
+
+更新 Go 或前端生产依赖后，运行 `node scripts/generate-third-party-notices.mjs` 重新生成第三方声明；发布工作流会检查声明是否为最新内容，并确认每个平台的压缩包都携带许可证文件。
+
 
 
 ## 为什么做这个项目

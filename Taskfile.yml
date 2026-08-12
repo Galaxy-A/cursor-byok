@@ -326,6 +326,7 @@ tasks:
     summary: 生成 update.json
     internal: true
     cmds:
+      - cp LICENSE THIRD_PARTY_NOTICES.txt "{{.RELEASE_DIR}}/"
       - go run ./scripts/release manifest -config ./build/config.yml -assets-dir "{{.RELEASE_DIR}}" -out "{{.RELEASE_DIR}}/update.json" -repo "{{.RELEASE_REPO}}" -base-name "{{.RELEASE_BASE_NAME}}" -notes "{{.RELEASE_NOTES_PATH}}"
 
   release:prepare:
@@ -525,6 +526,8 @@ tasks:
         notes = pathlib.Path("{{.RELEASE_NOTES_PATH}}").read_text(encoding="utf-8")
         assets = sorted([
             pathlib.Path("{{.RELEASE_DIR}}/update.json"),
+            pathlib.Path("{{.RELEASE_DIR}}/LICENSE"),
+            pathlib.Path("{{.RELEASE_DIR}}/THIRD_PARTY_NOTICES.txt"),
             *pathlib.Path("{{.RELEASE_DIR}}").glob("*.tar.gz"),
             *pathlib.Path("{{.RELEASE_DIR}}").glob("*.zip"),
         ])

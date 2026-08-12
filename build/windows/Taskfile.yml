@@ -141,7 +141,7 @@ tasks:
             ref: .DEV
           SCAN:
             ref: .SCAN
-      - cmd: powershell -NoProfile -Command "if (Test-Path -LiteralPath '{{.STAGING_DIR}}') { Remove-Item -LiteralPath '{{.STAGING_DIR}}' -Recurse -Force }; if (Test-Path -LiteralPath '{{.BIN_DIR}}/{{.ZIP_NAME}}') { Remove-Item -LiteralPath '{{.BIN_DIR}}/{{.ZIP_NAME}}' -Force }; New-Item -ItemType Directory -Force -Path '{{.STAGING_DIR}}' | Out-Null; Copy-Item -LiteralPath '{{.OUTPUT}}' -Destination '{{.STAGING_DIR}}'"
+      - cmd: powershell -NoProfile -Command "if (Test-Path -LiteralPath '{{.STAGING_DIR}}') { Remove-Item -LiteralPath '{{.STAGING_DIR}}' -Recurse -Force }; if (Test-Path -LiteralPath '{{.BIN_DIR}}/{{.ZIP_NAME}}') { Remove-Item -LiteralPath '{{.BIN_DIR}}/{{.ZIP_NAME}}' -Force }; New-Item -ItemType Directory -Force -Path '{{.STAGING_DIR}}' | Out-Null; Copy-Item -LiteralPath '{{.OUTPUT}}' -Destination '{{.STAGING_DIR}}'; Copy-Item -LiteralPath 'LICENSE' -Destination '{{.STAGING_DIR}}'; Copy-Item -LiteralPath 'THIRD_PARTY_NOTICES.txt' -Destination '{{.STAGING_DIR}}'"
         platforms: [windows]
       - cmd: powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::CreateFromDirectory([IO.Path]::GetFullPath('{{.STAGING_DIR}}'), [IO.Path]::GetFullPath('{{.BIN_DIR}}/{{.ZIP_NAME}}'), [IO.Compression.CompressionLevel]::Optimal, [bool]0)"
         platforms: [windows]
@@ -151,6 +151,7 @@ tasks:
           rm -rf "{{.STAGING_DIR}}"
           mkdir -p "{{.STAGING_DIR}}"
           cp "{{.OUTPUT}}" "{{.STAGING_DIR}}/"
+          cp LICENSE THIRD_PARTY_NOTICES.txt "{{.STAGING_DIR}}/"
           (cd "{{.STAGING_DIR}}" && zip -qry "../{{.ZIP_NAME}}" .)
           rm -rf "{{.STAGING_DIR}}"
           rm -f "{{.OUTPUT}}"

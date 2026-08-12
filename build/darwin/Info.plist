@@ -27,6 +27,6 @@
 		<key>NSHighResolutionCapable</key>
 		<string>true</string>
 		<key>NSHumanReadableCopyright</key>
-		<string>© 2026, Cursor助手</string>
+		<string>Copyright (c) 2026 leookun and contributors; modifications (c) 2026 Galaxy-A</string>
 	</dict>
 </plist>

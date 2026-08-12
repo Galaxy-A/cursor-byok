@@ -197,6 +197,7 @@ tasks:
       - mkdir -p "{{.BIN_DIR}}/{{.APP_BUNDLE}}/Contents/MacOS"
       - mkdir -p "{{.BIN_DIR}}/{{.APP_BUNDLE}}/Contents/Resources"
       - cp build/darwin/icons.icns "{{.BIN_DIR}}/{{.APP_BUNDLE}}/Contents/Resources"
+      - cp LICENSE THIRD_PARTY_NOTICES.txt "{{.BIN_DIR}}/{{.APP_BUNDLE}}/Contents/Resources/"
       - cp "{{.BINARY_PATH}}" "{{.BIN_DIR}}/{{.APP_BUNDLE}}/Contents/MacOS/{{.EXECUTABLE_NAME}}"
       - cp build/darwin/Info.plist "{{.BIN_DIR}}/{{.APP_BUNDLE}}/Contents"
       - task: codesign:adhoc

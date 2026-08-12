@@ -31,7 +31,7 @@ const localizedAuthorInfo = computed(() => {
   return {
     buttonText: "作者 leookun",
     dialogTitle: "作者寄语",
-    dialogContent: "本软件是纯免费软件，如果你被收费，那大概率就是被骗了。\n欢迎点击访问作者主页 https://space.bilibili.com/311706663/upload/video\n查看更多更新动态、使用分享和后续内容。",
+    dialogContent: "本软件是纯免费软件，如果你被收费，那大概率就是被骗了。\n欢迎点击访问作者主页 https://space.bilibili.com/311706663/upload/video\n查看更多更新动态、使用分享和后续内容。\n\n本项目是非官方社区项目，与 Anysphere 或 Cursor 官方不存在隶属、赞助或背书关系。Cursor 名称及相关商标归其权利人所有。",
     dialogConfirmText: "访问主页",
     dialogCancelText: "关闭",
   };

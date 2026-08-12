@@ -8,7 +8,7 @@
     !define INFO_PROJECTNAME "Cursor助手"
 !endif
 !ifndef INFO_COMPANYNAME
-    !define INFO_COMPANYNAME "Cursor助手"
+    !define INFO_COMPANYNAME "Galaxy-A"
 !endif
 !ifndef INFO_PRODUCTNAME
     !define INFO_PRODUCTNAME "Cursor助手"
@@ -17,7 +17,7 @@
     !define INFO_PRODUCTVERSION "0.0.46"
 !endif
 !ifndef INFO_COPYRIGHT
-    !define INFO_COPYRIGHT "© 2026, Cursor助手"
+    !define INFO_COPYRIGHT "Copyright (c) 2026 leookun and contributors; modifications (c) 2026 Galaxy-A"
 !endif
 !ifndef PRODUCT_EXECUTABLE
     !define PRODUCT_EXECUTABLE "${INFO_PROJECTNAME}.exe"

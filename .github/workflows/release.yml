@@ -100,6 +100,40 @@ jobs:
           mkdir -p artifacts
           cp "$source" artifacts/
 
+      - name: Verify license files in release asset
+        shell: bash
+        run: |
+          asset="$(find artifacts -maxdepth 1 -type f -print -quit)"
+          listing="$RUNNER_TEMP/release-asset-files.txt"
+          case "$asset" in
+            *.zip)
+              unzip -Z1 "$asset" > "$listing"
+              grep -qE '(^|/)LICENSE$' "$listing"
+              grep -qE '(^|/)THIRD_PARTY_NOTICES\.txt$' "$listing"
+              ;;
+            *macos-*.tar.gz)
+              tar -tzf "$asset" > "$listing"
+              grep -q '/Contents/Resources/LICENSE$' "$listing"
+              grep -q '/Contents/Resources/THIRD_PARTY_NOTICES\.txt$' "$listing"
+              ;;
+            *.tar.gz)
+              tar -tzf "$asset" > "$listing"
+              grep -qE '(^|/)LICENSE$' "$listing"
+              grep -qE '(^|/)THIRD_PARTY_NOTICES\.txt$' "$listing"
+              ;;
+            *)
+              echo "Unsupported release asset: $asset" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify third-party notices are current
+        if: matrix.platform == 'linux-amd64'
+        shell: bash
+        run: |
+          node scripts/generate-third-party-notices.mjs
+          git diff --exit-code -- THIRD_PARTY_NOTICES.txt
+
       - name: Upload release asset
         uses: actions/upload-artifact@v7
         with:
@@ -142,6 +176,7 @@ jobs:
           release_dir="bin/release/${version}"
           mkdir -p "$release_dir"
           cp artifacts/* "$release_dir/"
+          cp LICENSE THIRD_PARTY_NOTICES.txt "$release_dir/"
           cp release-notes.md "$release_dir/.release-notes.md"
 
           expected=(
