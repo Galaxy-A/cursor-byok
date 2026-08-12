@@ -16,7 +16,13 @@ const (
 	availableModelsUpgradeHours       = 2
 
 	modelRuntimeThinkingEffortParameterID = "thinking_effort"
-	localPathEncryptionKey                = "6f6e63652d6c6f63616c2d706174682d656e6372797074696f6e2d6b6579"
+
+	// localPathEncryptionKey — стабильный ключ шифрования путей для индексации
+	// репозитория, который cursor-agent CLI запрашивает через GetServerConfig
+	// (indexingConfig.default{User,Team}PathEncryptionKey). Без него CLI
+	// не может инициализировать repo identity в git-воркспейсе и вызовы
+	// файловых инструментов падают с "[unimplemented] HTTP 404".
+	localPathEncryptionKey = "6f6e63652d6c6f63616c2d706174682d656e6372797074696f6e2d6b6579"
 
 	localUltraMembershipType       = "ultra"
 	localUltraPaymentID            = "local_ultra"
@@ -139,7 +145,7 @@ var bootstrapStatsigTemplate = statsigBootstrapTemplate{
 		bootstrapStatsigGlassCustomThemeSupport:          buildEnabledStatsigGate(bootstrapStatsigGlassCustomThemeSupport),
 		bootstrapStatsigGlassAutomationsUI:               buildEnabledStatsigGate(bootstrapStatsigGlassAutomationsUI),
 		bootstrapStatsigTerminalUI2:                      buildEnabledStatsigGate(bootstrapStatsigTerminalUI2),
-		bootstrapStatsigDisableTerminalOutputUIStreaming: buildEnabledStatsigGate(bootstrapStatsigDisableTerminalOutputUIStreaming),
+		bootstrapStatsigDisableTerminalOutputUIStreaming: buildDisabledStatsigGate(bootstrapStatsigDisableTerminalOutputUIStreaming),
 		bootstrapStatsigBrowserCanvas:                    buildEnabledStatsigGate(bootstrapStatsigBrowserCanvas),
 		bootstrapStatsigEnableMultitaskMode:              buildEnabledStatsigGate(bootstrapStatsigEnableMultitaskMode),
 		bootstrapStatsigDecomposeAlwaysLocalExtHostGate:  buildDisabledStatsigGate(bootstrapStatsigDecomposeAlwaysLocalExtHostGate),
@@ -445,6 +451,7 @@ func buildAvailableModelsPayload(reqCtx *RequestContext) (map[string]any, error)
 	if len(modelRefs) > 0 {
 		defaultModel = modelRefs[0]
 	}
+	modelEntries := buildAvailableModelEntries(adapters)
 	return map[string]any{
 		"backgroundComposerModelConfig": map[string]any{
 			"bestOfNDefaultModels": append([]string(nil), modelRefs...),
@@ -464,7 +471,7 @@ func buildAvailableModelsPayload(reqCtx *RequestContext) (map[string]any, error)
 			"defaultModel": defaultModel,
 		},
 		"disableUnusedModelsAfterNHours": availableModelsDisableUnusedHours,
-		"models":                         buildAvailableModelEntries(adapters),
+		"models":                         modelEntries,
 		"planExecutionModelConfig": map[string]any{
 			"defaultModel":   defaultModel,
 			"fallbackModels": append([]string(nil), modelRefs...),
@@ -713,6 +720,27 @@ func buildAvailableModelEntries(adapters []legacyruntime.ModelAdapterConfig) []m
 	return output
 }
 
+func buildCLIModelDetails(adapters []legacyruntime.ModelAdapterConfig) []map[string]any {
+	models := make([]map[string]any, 0, len(adapters))
+	for _, adapter := range adapters {
+		channelID := strings.TrimSpace(adapter.ID)
+		if channelID == "" {
+			continue
+		}
+		models = append(models, map[string]any{
+			"modelId":          channelID,
+			"displayModelId":   channelID,
+			"displayName":      strings.TrimSpace(adapter.DisplayName),
+			"displayNameShort": strings.TrimSpace(adapter.DisplayName),
+			"apiKeyCredentials": map[string]any{
+				"apiKey":  strings.TrimSpace(adapter.APIKey),
+				"baseUrl": strings.TrimSpace(adapter.BaseURL),
+			},
+		})
+	}
+	return models
+}
+
 func buildThinkingEffortParameterDefinitions(adapterType string) []map[string]any {
 	values := thinkingEffortValuesForAdapter(adapterType)
 	options := make([]map[string]any, 0, len(values))
@@ -857,31 +885,14 @@ func collectModelAdapterRefs(adapters []legacyruntime.ModelAdapterConfig) []stri
 	return output
 }
 
+// firstModelAdapterRef возвращает канал первого адаптера или пустую строку,
+// если ни один адаптер не сконфигурирован.
 func firstModelAdapterRef(adapters []legacyruntime.ModelAdapterConfig) string {
 	refs := collectModelAdapterRefs(adapters)
 	if len(refs) == 0 {
 		return ""
 	}
 	return refs[0]
-}
-
-func buildCLIModelDetails(adapters []legacyruntime.ModelAdapterConfig) []map[string]any {
-	models := make([]map[string]any, 0, len(adapters))
-	for _, adapter := range adapters {
-		channelID := strings.TrimSpace(adapter.ID)
-		if channelID == "" {
-			continue
-		}
-		models = append(models, map[string]any{
-			"modelId":        channelID,
-			"displayModelId": channelID,
-			"apiKeyCredentials": map[string]any{
-				"apiKey":  strings.TrimSpace(adapter.APIKey),
-				"baseUrl": strings.TrimSpace(adapter.BaseURL),
-			},
-		})
-	}
-	return models
 }
 
 func resolveBootstrapStatsigAuthID(reqCtx *RequestContext) string {

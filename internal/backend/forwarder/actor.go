@@ -529,7 +529,7 @@ func (service *Service) applyProviderModelEvent(stream *ActiveStream, event mode
 			stream.mu.Unlock()
 		}
 		if shouldEmitSyntheticThinking {
-			if err := service.broker.Publish(requestID, StreamEvent{Message: buildThinkingDeltaMessage("Thinking is encrypted. Please wait a moment.", event.ThinkingStyle)}); err != nil {
+			if err := service.broker.Publish(requestID, StreamEvent{Message: buildThinkingDeltaMessage("The reasoning process is encrypted. Please wait a moment. (This message does not affect any functionality; it only indicates the current reasoning status.)", event.ThinkingStyle)}); err != nil {
 				return err
 			}
 		}
@@ -729,6 +729,9 @@ func (service *Service) handleProviderDoneEvent(stream *ActiveStream, payload *s
 		if errors.As(payload.Err, &providerErr) {
 			service.setTurnPhase(stream, TurnPhaseFailed)
 			return service.closeStreamWithProviderError(stream, conversationID, turnSeq, requestID, accumulatedText, accumulatedReasoning, accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, usage, providerErr, !hadToolInvocation)
+		}
+		if err := service.flushAssistantText(stream, conversationID, turnSeq, requestID, accumulatedText, accumulatedReasoning, accumulatedReasoningSignature, accumulatedReasoningSignatureSource, accumulatedReasoningItemID, accumulatedReasoningStatus, accumulatedReasoningSummary, !hadToolInvocation); err != nil {
+			return service.failStream(stream, "unknown", fmt.Errorf("flush failed provider output: %w", err))
 		}
 		service.setTurnPhase(stream, TurnPhaseFailed)
 		return service.failStream(stream, "unknown", payload.Err)

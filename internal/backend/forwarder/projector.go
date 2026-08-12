@@ -326,20 +326,24 @@ func compactedPromptProjectionEntries(entries []HistoryEntry) []HistoryEntry {
 		latestToolCallID := latestCompletedToolCallIDForTurn(entries, compactionPayload.CurrentTurnSeq, compactionPayload.CurrentRequestID)
 		preservedIndexes = autoCompactionPreservedEntryIndexes(entries, compactionPayload.CurrentTurnSeq, compactionPayload.CurrentRequestID, latestToolCallID)
 	}
-	filtered := make([]HistoryEntry, 0, len(entries)-compactionIndex)
-	for index, entry := range entries {
-		if index < compactionIndex && isPromptReplayEntryKind(entry.Kind) {
-			if _, ok := preservedIndexes[index]; !ok {
-				continue
-			}
+	filtered := make([]HistoryEntry, 0, len(entries)-compactionIndex+len(preservedIndexes))
+	for index := 0; index < compactionIndex; index++ {
+		if !isPromptReplayEntryKind(entries[index].Kind) {
+			filtered = append(filtered, entries[index])
 		}
-		if index < compactionIndex {
-			if rewritten, ok := compactedProjectionPreservedEntry(entry); ok {
-				entry = rewritten
-			}
+	}
+	filtered = append(filtered, entries[compactionIndex])
+	for index := 0; index < compactionIndex; index++ {
+		if _, ok := preservedIndexes[index]; !ok || isCompactionSummaryKind(entries[index].Kind) {
+			continue
+		}
+		entry := entries[index]
+		if rewritten, ok := compactedProjectionPreservedEntry(entry); ok {
+			entry = rewritten
 		}
 		filtered = append(filtered, entry)
 	}
+	filtered = append(filtered, entries[compactionIndex+1:]...)
 	return filtered
 }
 
@@ -575,7 +579,7 @@ func (projector *HistoryProjector) ProjectCheckpointProjection(conversation *Con
 	if err != nil {
 		return nil, err
 	}
-	state.Turns = turnIDs
+	state.Turns = append(cloneByteSlices(conversation.ImportedTurnIDs), turnIDs...)
 	replayMessages, err := projector.ProjectPromptReplay(conversation)
 	if err != nil {
 		return nil, err
@@ -621,7 +625,6 @@ func projectCheckpointTurnBlobs(conversation *ConversationFile, blobs *checkpoin
 		}
 		grouped[entry.TurnSeq] = append(grouped[entry.TurnSeq], entry)
 	}
-
 	logicalTurns := make([][]HistoryEntry, 0, len(order))
 	for _, turnSeq := range order {
 		entries := grouped[turnSeq]
@@ -671,19 +674,31 @@ func projectCheckpointTurnBlobs(conversation *ConversationFile, blobs *checkpoin
 					continue
 				}
 				if strings.TrimSpace(payload.ReasoningContent) != "" {
-					steps = append(steps, &agentv1.ConversationStep{Message: &agentv1.ConversationStep_ThinkingMessage{ThinkingMessage: &agentv1.ThinkingMessage{Text: payload.ReasoningContent}}})
+					steps = append(steps, &agentv1.ConversationStep{
+						Message: &agentv1.ConversationStep_ThinkingMessage{
+							ThinkingMessage: &agentv1.ThinkingMessage{Text: payload.ReasoningContent},
+						},
+					})
 				}
 				if strings.TrimSpace(payload.Text) == "" {
 					continue
 				}
-				steps = append(steps, &agentv1.ConversationStep{Message: &agentv1.ConversationStep_AssistantMessage{AssistantMessage: &agentv1.AssistantMessage{Text: strings.TrimSpace(payload.Text)}}})
+				steps = append(steps, &agentv1.ConversationStep{
+					Message: &agentv1.ConversationStep_AssistantMessage{
+						AssistantMessage: &agentv1.AssistantMessage{Text: strings.TrimSpace(payload.Text)},
+					},
+				})
 			case "tool_call":
 				var payload toolCallEntryPayload
 				if err := json.Unmarshal(entry.Payload, &payload); err != nil {
 					return nil, err
 				}
 				if strings.TrimSpace(payload.ReasoningContent) != "" {
-					steps = append(steps, &agentv1.ConversationStep{Message: &agentv1.ConversationStep_ThinkingMessage{ThinkingMessage: &agentv1.ThinkingMessage{Text: payload.ReasoningContent}}})
+					steps = append(steps, &agentv1.ConversationStep{
+						Message: &agentv1.ConversationStep_ThinkingMessage{
+							ThinkingMessage: &agentv1.ThinkingMessage{Text: payload.ReasoningContent},
+						},
+					})
 				}
 				toolCall := &agentv1.ToolCall{}
 				toolCallID := strings.TrimSpace(payload.ToolCallID)
@@ -697,7 +712,9 @@ func projectCheckpointTurnBlobs(conversation *ConversationFile, blobs *checkpoin
 					}
 					proto.Merge(toolCall, completedToolCall)
 				}
-				steps = append(steps, &agentv1.ConversationStep{Message: &agentv1.ConversationStep_ToolCall{ToolCall: toolCall}})
+				steps = append(steps, &agentv1.ConversationStep{
+					Message: &agentv1.ConversationStep_ToolCall{ToolCall: toolCall},
+				})
 				if toolCallID != "" {
 					seenToolCalls[toolCallID] = struct{}{}
 					openToolCalls[toolCallID] = struct{}{}
@@ -715,7 +732,11 @@ func projectCheckpointTurnBlobs(conversation *ConversationFile, blobs *checkpoin
 					continue
 				}
 				if strings.TrimSpace(payload.ReasoningContent) != "" {
-					steps = append(steps, &agentv1.ConversationStep{Message: &agentv1.ConversationStep_ThinkingMessage{ThinkingMessage: &agentv1.ThinkingMessage{Text: payload.ReasoningContent}}})
+					steps = append(steps, &agentv1.ConversationStep{
+						Message: &agentv1.ConversationStep_ThinkingMessage{
+							ThinkingMessage: &agentv1.ThinkingMessage{Text: payload.ReasoningContent},
+						},
+					})
 				}
 				if len(payload.ToolCall) == 0 {
 					continue
@@ -724,7 +745,9 @@ func projectCheckpointTurnBlobs(conversation *ConversationFile, blobs *checkpoin
 				if err := protojson.Unmarshal(payload.ToolCall, toolCall); err != nil {
 					return nil, err
 				}
-				steps = append(steps, &agentv1.ConversationStep{Message: &agentv1.ConversationStep_ToolCall{ToolCall: toolCall}})
+				steps = append(steps, &agentv1.ConversationStep{
+					Message: &agentv1.ConversationStep_ToolCall{ToolCall: toolCall},
+				})
 			}
 		}
 		if len(userMessageID) == 0 {
@@ -738,11 +761,18 @@ func projectCheckpointTurnBlobs(conversation *ConversationFile, blobs *checkpoin
 			}
 			stepIDs = append(stepIDs, stepID)
 		}
-		agentTurn := &agentv1.AgentConversationTurnStructure{UserMessage: userMessageID, Steps: stepIDs}
+		agentTurn := &agentv1.AgentConversationTurnStructure{
+			UserMessage: userMessageID,
+			Steps:       stepIDs,
+		}
 		if turnRequestID != "" {
 			agentTurn.RequestId = &turnRequestID
 		}
-		turnPayload, err := proto.Marshal(&agentv1.ConversationTurnStructure{Turn: &agentv1.ConversationTurnStructure_AgentConversationTurn{AgentConversationTurn: agentTurn}})
+		turnPayload, err := proto.Marshal(&agentv1.ConversationTurnStructure{
+			Turn: &agentv1.ConversationTurnStructure_AgentConversationTurn{
+				AgentConversationTurn: agentTurn,
+			},
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -1230,60 +1260,6 @@ func shouldPersistCheckpointReplayToolResultName(toolName string) bool {
 	}
 }
 
-func filterCheckpointTurns(rawTurns [][]byte) [][]byte {
-	if len(rawTurns) == 0 {
-		return nil
-	}
-	filtered := make([][]byte, 0, len(rawTurns))
-	for _, rawTurn := range rawTurns {
-		if len(rawTurn) == 0 {
-			continue
-		}
-		turn := &agentv1.ConversationTurnStructure{}
-		if err := proto.Unmarshal(rawTurn, turn); err != nil {
-			filtered = append(filtered, append([]byte(nil), rawTurn...))
-			continue
-		}
-		agentTurn := turn.GetAgentConversationTurn()
-		if agentTurn == nil {
-			filtered = append(filtered, append([]byte(nil), rawTurn...))
-			continue
-		}
-
-		nextSteps := make([][]byte, 0, len(agentTurn.GetSteps()))
-		for _, rawStep := range agentTurn.GetSteps() {
-			if len(rawStep) == 0 {
-				continue
-			}
-			step := &agentv1.ConversationStep{}
-			if err := proto.Unmarshal(rawStep, step); err != nil {
-				continue
-			}
-			if toolCall := step.GetToolCall(); toolCall != nil && !shouldPersistCheckpointReplayToolResultName(inferToolName(toolCall)) {
-				continue
-			}
-			nextSteps = append(nextSteps, append([]byte(nil), rawStep...))
-		}
-		if len(agentTurn.GetUserMessage()) == 0 && len(nextSteps) == 0 {
-			continue
-		}
-		encoded, err := proto.Marshal(&agentv1.ConversationTurnStructure{
-			Turn: &agentv1.ConversationTurnStructure_AgentConversationTurn{
-				AgentConversationTurn: &agentv1.AgentConversationTurnStructure{
-					UserMessage: append([]byte(nil), agentTurn.GetUserMessage()...),
-					Steps:       nextSteps,
-				},
-			},
-		})
-		if err != nil {
-			filtered = append(filtered, append([]byte(nil), rawTurn...))
-			continue
-		}
-		filtered = append(filtered, encoded)
-	}
-	return filtered
-}
-
 func filterCheckpointPersistentToolReplay(messages []promptengine.Message) []promptengine.Message {
 	if len(messages) == 0 {
 		return nil
@@ -1320,7 +1296,7 @@ func filterCheckpointPersistentToolReplay(messages []promptengine.Message) []pro
 	return filtered
 }
 
-func restoreImportedReplayUserMessages(messages []promptengine.Message, importedTurns [][]byte) []promptengine.Message {
+func restoreImportedReplayUserMessages(messages []promptengine.Message, importedTurns [][]byte, blobs importedBlobStore) []promptengine.Message {
 	if len(messages) == 0 || len(importedTurns) == 0 {
 		return messages
 	}
@@ -1329,16 +1305,16 @@ func restoreImportedReplayUserMessages(messages []promptengine.Message, imported
 		if len(rawTurn) == 0 {
 			continue
 		}
-		turn := &agentv1.ConversationTurnStructure{}
-		if err := proto.Unmarshal(rawTurn, turn); err != nil {
+		turn, _, err := decodeImportedTurn(rawTurn, blobs)
+		if err != nil || turn == nil {
 			continue
 		}
 		agentTurn := turn.GetAgentConversationTurn()
 		if agentTurn == nil || len(agentTurn.GetUserMessage()) == 0 {
 			continue
 		}
-		userMessage := &agentv1.UserMessage{}
-		if err := proto.Unmarshal(agentTurn.GetUserMessage(), userMessage); err != nil {
+		userMessage, err := decodeImportedUserMessage(agentTurn.GetUserMessage(), blobs)
+		if err != nil {
 			continue
 		}
 		replay, ok := promptengine.BuildUserMessageReplayMessage(userMessage)
@@ -1353,38 +1329,6 @@ func restoreImportedReplayUserMessages(messages []promptengine.Message, imported
 				}
 				if strings.TrimSpace(messages[cursor].Content) == "" {
 					messages[cursor].Content = replay.Content
-				}
-				cursor++
-				break
-			}
-			cursor++
-		}
-	}
-	return messages
-}
-
-func restoreImportedReplayUserMessagesFromBlobs(messages []promptengine.Message, importedTurns [][]byte, blobs importedBlobStore) []promptengine.Message {
-	if len(messages) == 0 || len(importedTurns) == 0 {
-		return messages
-	}
-	cursor := 0
-	for _, rawTurn := range importedTurns {
-		turn, _, err := decodeImportedTurn(rawTurn, blobs)
-		if err != nil || turn == nil || turn.GetAgentConversationTurn() == nil {
-			continue
-		}
-		userMessage, err := decodeImportedUserMessage(turn.GetAgentConversationTurn().GetUserMessage(), blobs)
-		if err != nil {
-			continue
-		}
-		replay, ok := promptengine.BuildUserMessageReplayMessage(userMessage)
-		if !ok || len(replay.ContentParts) == 0 {
-			continue
-		}
-		for cursor < len(messages) {
-			if strings.TrimSpace(messages[cursor].Role) == "user" && strings.TrimSpace(messages[cursor].Content) == strings.TrimSpace(replay.Content) {
-				if len(messages[cursor].ContentParts) == 0 {
-					messages[cursor].ContentParts = replay.ContentParts
 				}
 				cursor++
 				break

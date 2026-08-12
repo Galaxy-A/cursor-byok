@@ -306,7 +306,7 @@ function normalizeModelAdapterTestStatus(value) {
 export function formatModelAdapterTestSummary(source) {
   const result = source && typeof source === "object" ? source : {};
   const status = normalizeModelAdapterTestStatus(result.status);
-  if (status === "running") {
+  if (status === "running" || status === "success") {
     return "测试中...";
   }
   if (status === "error") {
@@ -1579,3 +1579,4 @@ export async function bootstrapAppState() {
   await syncServiceState().catch(() => {});
   await syncHomeMetrics().catch(() => {});
 }
+

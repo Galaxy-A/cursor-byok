@@ -801,6 +801,7 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 		"subagent_model_override_count": len(intent.SubagentModelOverrides),
 		"subagent_model_overrides":      subagentModelOverrideSummaries(intent.SubagentModelOverrides),
 		"latest_user_text":              userMessageText(intent.UserMessage),
+		"manual_compaction_requested":   intent.ManualCompaction.Requested,
 	})
 	if err := service.publishCheckpoint(intent.RequestID, intent.ConversationID); err != nil {
 		return err
@@ -898,6 +899,7 @@ func checkpointTurnHasReplayActivity(stream *ActiveStream) bool {
 }
 
 // persistInterruptedProviderOutput commits the current provider pass before cancellation.
+// The entry key is stable for this provider pass, so repeated cancellation handling is a no-op.
 func (service *Service) persistInterruptedProviderOutput(stream *ActiveStream) (bool, error) {
 	if stream == nil {
 		return false, nil
@@ -918,22 +920,25 @@ func (service *Service) persistInterruptedProviderOutput(stream *ActiveStream) (
 	if strings.TrimSpace(text) == "" && !hasReplayableReasoningPayload(reasoning, reasoningSignature, reasoningSignatureSource) {
 		return false, nil
 	}
-	_, err := service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{{
-		TurnSeq:        turnSeq,
-		RequestID:      requestID,
-		IdempotencyKey: interruptedProviderOutputIdempotencyKey(turnSeq, requestID, modelCallID, providerPass),
-		Role:           "assistant",
-		Kind:           "assistant_text",
-		Payload: newAssistantTextPayload(
-			text,
-			reasoning,
-			reasoningSignature,
-			reasoningSignatureSource,
-			reasoningItemID,
-			reasoningStatus,
-			reasoningSummary,
-		),
-	}})
+	key := interruptedProviderOutputIdempotencyKey(turnSeq, requestID, modelCallID, providerPass)
+	_, err := service.appendConversationEntries(stream, stream.ConversationID, []HistoryEntry{
+		{
+			TurnSeq:        turnSeq,
+			RequestID:      requestID,
+			IdempotencyKey: key,
+			Role:           "assistant",
+			Kind:           "assistant_text",
+			Payload: newAssistantTextPayload(
+				text,
+				reasoning,
+				reasoningSignature,
+				reasoningSignatureSource,
+				reasoningItemID,
+				reasoningStatus,
+				reasoningSummary,
+			),
+		},
+	})
 	return true, err
 }
 
@@ -999,6 +1004,11 @@ func (service *Service) handleExecResult(intent InboundIntent) error {
 			Message: buildShellOutputDeltaMessage(result.ShellOutputDelta),
 		}); err != nil {
 			return err
+		}
+		if message := buildShellToolCallDeltaMessage(pending.ToolCallID, pending.ModelCallID, result.ShellOutputDelta); message != nil {
+			if err := service.broker.Publish(intent.RequestID, StreamEvent{Message: message}); err != nil {
+				return err
+			}
 		}
 	}
 	if !result.IsTerminal {
@@ -2238,6 +2248,15 @@ func (service *Service) finishSuccessfulTurnAfterCheckpoint(stream *ActiveStream
 	return nil
 }
 
+func (service *Service) finishFailedTurnAfterCheckpoint(stream *ActiveStream, terminalCode string, terminalMessage string) error {
+	if stream == nil {
+		return nil
+	}
+	err := service.broker.Fail(stream.RequestID, terminalCode, terminalMessage)
+	service.setTurnPhase(stream, TurnPhaseFailed)
+	return err
+}
+
 func (service *Service) failStreamIfNonTerminal(stream *ActiveStream, terminalCode string, cause error) error {
 	if stream == nil || cause == nil {
 		return nil
@@ -2257,6 +2276,10 @@ func (service *Service) publishCheckpoint(requestID string, conversationID strin
 }
 
 func (service *Service) publishCheckpointWithCompletion(requestID string, _ string, completion *pendingTurnCompletion) error {
+	return service.publishCheckpointWithTerminalAction(requestID, successfulCheckpointTerminalAction(completion))
+}
+
+func (service *Service) publishCheckpointWithTerminalAction(requestID string, terminal checkpointTerminalAction) error {
 	stream, ok := service.broker.Get(requestID)
 	if !ok || stream == nil {
 		return fmt.Errorf("request is not active: %s", requestID)
@@ -2274,7 +2297,7 @@ func (service *Service) publishCheckpointWithCompletion(requestID string, _ stri
 	}
 	projection.State.PendingToolCalls = buildPendingToolCalls(pendingExecs, pendingInteractions)
 	service.rewriteCheckpointTokenDetailsForClient(stream, conversation, projection.State)
-	return service.queueCheckpointProjection(stream, projection, completion)
+	return service.queueCheckpointProjectionWithTerminal(stream, projection, terminal)
 }
 
 func (service *Service) rewriteCheckpointTokenDetailsForClient(stream *ActiveStream, conversation *ConversationFile, state *agentv1.ConversationStateStructure) {
@@ -2414,18 +2437,20 @@ func (service *Service) failActiveStream(stream *ActiveStream, conversationID st
 	if cancel != nil {
 		cancel()
 	}
-	service.setTurnPhase(stream, TurnPhaseFailed)
-	var firstErr error
-	if err := service.syncSummaryCarryForward(conversationID, requestID, modelCallID); err != nil && firstErr == nil {
-		firstErr = err
+	if err := service.syncSummaryCarryForward(conversationID, requestID, modelCallID); err != nil {
+		log.Printf(
+			"forwarder summary sync before failed terminal skipped request_id=%s model_call_id=%s err=%v",
+			strings.TrimSpace(requestID),
+			strings.TrimSpace(modelCallID),
+			err,
+		)
 	}
-	if err := service.publishCheckpoint(requestID, conversationID); err != nil && firstErr == nil {
-		firstErr = err
+	terminal := failedCheckpointTerminalAction(terminalCode, terminalMessage)
+	if err := service.publishCheckpointWithTerminalAction(requestID, terminal); err != nil {
+		log.Printf("forwarder checkpoint queue before failed terminal skipped request_id=%s err=%v", strings.TrimSpace(requestID), err)
+		return service.finishFailedTurnAfterCheckpoint(stream, terminalCode, terminalMessage)
 	}
-	if err := service.broker.Fail(requestID, terminalCode, terminalMessage); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
+	return nil
 }
 
 // buildRunEntries 构造一次 run intent 需要写入 history 的首批 entry。
@@ -2778,19 +2803,29 @@ func inboundConversationAction(message *agentv1.AgentClientMessage) *agentv1.Con
 	if action := message.GetConversationAction(); action != nil {
 		return action
 	}
-	if request := message.GetRunRequest(); request != nil {
-		return request.GetAction()
+	if runRequest := message.GetRunRequest(); runRequest != nil {
+		return runRequest.GetAction()
 	}
 	return nil
 }
 
+func conversationActionIsSummarize(action *agentv1.ConversationAction) bool {
+	if action == nil {
+		return false
+	}
+	_, ok := action.GetAction().(*agentv1.ConversationAction_SummarizeAction)
+	return ok
+}
+
 func resolveInboundManualCompaction(message *agentv1.AgentClientMessage, userMessage *agentv1.UserMessage) manualCompactionDirective {
 	instruction, requested := parseManualCompactionRequest(userMessage)
-	if action := inboundConversationAction(message); action != nil {
-		_, summarize := action.GetAction().(*agentv1.ConversationAction_SummarizeAction)
-		requested = requested || summarize
+	if conversationActionIsSummarize(inboundConversationAction(message)) {
+		requested = true
 	}
-	return manualCompactionDirective{Requested: requested, Instruction: instruction}
+	return manualCompactionDirective{
+		Requested:   requested,
+		Instruction: instruction,
+	}
 }
 
 func conversationActionStartsRun(action *agentv1.ConversationAction) bool {

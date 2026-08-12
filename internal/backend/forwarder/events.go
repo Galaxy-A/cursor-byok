@@ -26,22 +26,6 @@ func buildHeartbeatMessage() *agentv1.AgentServerMessage {
 	}
 }
 
-func buildSetCheckpointBlobMessage(id uint32, blob CheckpointBlob) *agentv1.AgentServerMessage {
-	return &agentv1.AgentServerMessage{
-		Message: &agentv1.AgentServerMessage_KvServerMessage{
-			KvServerMessage: &agentv1.KvServerMessage{
-				Id: id,
-				Message: &agentv1.KvServerMessage_SetBlobArgs{
-					SetBlobArgs: &agentv1.SetBlobArgs{
-						BlobId:   append([]byte(nil), blob.ID...),
-						BlobData: append([]byte(nil), blob.Data...),
-					},
-				},
-			},
-		},
-	}
-}
-
 // buildTextDeltaMessage 构造文本增量消息。
 func buildTextDeltaMessage(text string) *agentv1.AgentServerMessage {
 	return &agentv1.AgentServerMessage{
@@ -217,6 +201,41 @@ func buildShellOutputDeltaMessage(delta *agentv1.ShellOutputDeltaUpdate) *agentv
 	}
 }
 
+// buildShellToolCallDeltaMessage maps client shell output to the delta consumed by Cursor's terminal bubble.
+func buildShellToolCallDeltaMessage(callID string, modelCallID string, output *agentv1.ShellOutputDeltaUpdate) *agentv1.AgentServerMessage {
+	if output == nil {
+		return nil
+	}
+	var delta *agentv1.ShellToolCallDelta
+	switch event := output.GetEvent().(type) {
+	case *agentv1.ShellOutputDeltaUpdate_Stdout:
+		content := event.Stdout.GetData()
+		if content == "" {
+			return nil
+		}
+		delta = &agentv1.ShellToolCallDelta{
+			Delta: &agentv1.ShellToolCallDelta_Stdout{
+				Stdout: &agentv1.ShellToolCallStdoutDelta{Content: content},
+			},
+		}
+	case *agentv1.ShellOutputDeltaUpdate_Stderr:
+		content := event.Stderr.GetData()
+		if content == "" {
+			return nil
+		}
+		delta = &agentv1.ShellToolCallDelta{
+			Delta: &agentv1.ShellToolCallDelta_Stderr{
+				Stderr: &agentv1.ShellToolCallStderrDelta{Content: content},
+			},
+		}
+	default:
+		return nil
+	}
+	return buildToolCallDeltaMessage(callID, modelCallID, &agentv1.ToolCallDelta{
+		Delta: &agentv1.ToolCallDelta_ShellToolCallDelta{ShellToolCallDelta: delta},
+	})
+}
+
 // buildTurnEndedMessage 构造 turn 结束消息，并携带标准化后的 token 统计。
 func buildTurnEndedMessage(inputTokens int64, outputTokens int64, cacheReadTokens int64, cacheWriteTokens int64) *agentv1.AgentServerMessage {
 	inputTokensValue := inputTokens
@@ -257,6 +276,22 @@ func buildCheckpointMessage(state *agentv1.ConversationStateStructure) *agentv1.
 	return &agentv1.AgentServerMessage{
 		Message: &agentv1.AgentServerMessage_ConversationCheckpointUpdate{
 			ConversationCheckpointUpdate: cloned,
+		},
+	}
+}
+
+func buildSetCheckpointBlobMessage(id uint32, blob CheckpointBlob) *agentv1.AgentServerMessage {
+	return &agentv1.AgentServerMessage{
+		Message: &agentv1.AgentServerMessage_KvServerMessage{
+			KvServerMessage: &agentv1.KvServerMessage{
+				Id: id,
+				Message: &agentv1.KvServerMessage_SetBlobArgs{
+					SetBlobArgs: &agentv1.SetBlobArgs{
+						BlobId:   append([]byte(nil), blob.ID...),
+						BlobData: append([]byte(nil), blob.Data...),
+					},
+				},
+			},
 		},
 	}
 }

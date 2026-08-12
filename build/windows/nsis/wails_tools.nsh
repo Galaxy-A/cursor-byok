@@ -14,7 +14,7 @@
     !define INFO_PRODUCTNAME "Cursor助手"
 !endif
 !ifndef INFO_PRODUCTVERSION
-    !define INFO_PRODUCTVERSION "0.0.46"
+    !define INFO_PRODUCTVERSION "0.0.47"
 !endif
 !ifndef INFO_COPYRIGHT
     !define INFO_COPYRIGHT "Copyright (c) 2026 leookun and contributors; modifications (c) 2026 Galaxy-A"
