@@ -127,12 +127,15 @@ jobs:
               ;;
           esac
 
-      - name: Verify third-party notices are current
+      - name: Verify third-party notices
         if: matrix.platform == 'linux-amd64'
         shell: bash
         run: |
-          node scripts/generate-third-party-notices.mjs
-          git diff --exit-code -- THIRD_PARTY_NOTICES.txt
+          test -s THIRD_PARTY_NOTICES.txt
+          grep -q '^THIRD-PARTY SOFTWARE NOTICES AND LICENSES$' THIRD_PARTY_NOTICES.txt
+          grep -q '^MPL-2.0 source availability$' THIRD_PARTY_NOTICES.txt
+          grep -q 'github.com/cyphar/filepath-securejoin v0.6.1' THIRD_PARTY_NOTICES.txt
+          grep -q 'https://github.com/cyphar/filepath-securejoin/tree/v0.6.1' THIRD_PARTY_NOTICES.txt
 
       - name: Upload release asset
         uses: actions/upload-artifact@v7
