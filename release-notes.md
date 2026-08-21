@@ -1,3 +1,10 @@
+- 手工适配上游 0.0.49：支持完整配置导入导出，并允许 OpenAI 模型不设置 reasoning_effort
+- Read 图片改为按内容哈希持久化，在 provider 请求边界恢复图片内容，避免历史记录内联大体积数据
+- 修复 assistant 文本穿插时工具调用被误判为悬空，以及 Responses 历史工具结果缺少配对调用的问题
+- 修复长耗时请求被 Cursor 误判为 Network disconnected，并保持本地路由与上游转发模式兼容
+- 移除仓库共享 CA 私钥，改为每次安装生成独立 CA，并清理旧版共享证书
+- 同步最新 Agent、Ask、Debug、Plan、Subagent 和 Multitask prompt，保留 Codex 出站协议、append-only history、provider pass 隔离与 Galaxy-A 发布定制
+-------0.0.49------
 - 手工适配上游 0.0.46：修复 checkpoint 与 Fork Chat 的恢复衔接
 - 修复打断对话时已生成上下文丢失，并保持 append-only 历史与 provider pass 隔离
 - 支持拖动模型排序并持久化顺序，保留一键拉取模型和 Codex outbound 配置
