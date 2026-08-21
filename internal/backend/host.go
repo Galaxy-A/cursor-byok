@@ -637,6 +637,18 @@ func (host *Host) rebuildLocked(cfg serverconfig.Config) error {
 				Name: "dashboard",
 			})),
 		),
+		// Cursor 会在慢请求开始后探测本地网络状态；404 会被客户端解释为断网，
+		// 从而中止仍在正常流式返回的请求。这里固定返回成功响应。
+		server.POST("/aiserver.v1.NetworkService/IsConnected",
+			server.Name("network_is_connected"),
+			server.ConnectUnary(),
+			server.Local(upstream.MockProtoAction(routeDeps, upstream.CompatRouteConfig{
+				Name:          "network_is_connected",
+				StatusCode:    http.StatusOK,
+				MockProtoType: "aiserver.v1.IsConnectedResponse",
+				MockBuilder:   upstream.EmptyMockBuilder,
+			})),
+		),
 		server.Any("/aiserver.v1.NetworkService/*",
 			server.Name("network_service"),
 			server.HTTP(),

@@ -38,6 +38,7 @@ const modelTypeTabs = [
 ];
 
 const reasoningEffortOptions = [
+  { label: "不设置", value: "", icon: "icon-[mdi--minus-circle-outline]" },
   { label: "低", value: "low", icon: "icon-[mdi--head-outline]" },
   { label: "中", value: "medium", icon: "icon-[mdi--head-lightbulb-outline]" },
   { label: "高", value: "high", icon: "icon-[mdi--brain]" },
@@ -144,7 +145,7 @@ const fieldTips = {
   baseURL: "模型服务的 API 根地址，通常为兼容 OpenAI 或 Anthropic 的接口入口。",
   apiKey: "调用该模型服务需要使用的访问密钥。",
   contextWindowTokens: "模型单次可接受的最大上下文 Token 数。留空时使用默认值。",
-  reasoningEffort: "推理强度仅对部分支持 reasoning_effort 的模型生效，并不是所有模型都支持。越高通常越稳，但也可能更慢。",
+  reasoningEffort: "仅当模型支持 reasoning_effort 时才选择推理强度；选择“不设置”后，请求不会携带该参数。越高通常越稳，但也可能更慢。",
   maxCompletionTokens: "单次回复允许生成的最大 Token 数。留空时使用默认值。",
   openAIEndpoint: "选择接口协议端点。选“自定义路径”时，请在接口地址栏填写完整请求地址（含 /chat/completions 或 /responses 路径后缀），系统会根据末段自动判断协议形态。",
   codexOutbound: "开启后，Cursor助手会把该模型的 OpenAI 出站请求包装为 Codex CLI Responses 请求，包括 Codex 客户端标识、会话标识和工具调用格式。",

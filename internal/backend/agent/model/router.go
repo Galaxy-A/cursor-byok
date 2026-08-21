@@ -341,57 +341,77 @@ func mergeProviderReasoningMetadata(last *Message, current Message) {
 	}
 }
 
+func providerToolResponseWindowEnd(messages []Message, index int) int {
+	end := index + 1
+	for end < len(messages) {
+		candidate := messages[end]
+		switch {
+		case strings.TrimSpace(candidate.Role) == "tool":
+			end++
+		case strings.TrimSpace(candidate.Role) == "assistant" && len(candidate.ToolCalls) == 0:
+			end++
+		default:
+			return end
+		}
+	}
+	return end
+}
+
 func trimDanglingAssistantToolCalls(input []Message) []Message {
 	if len(input) == 0 {
 		return nil
 	}
-	trimmed := make([]Message, 0, len(input))
-	for index := 0; index < len(input); index++ {
-		message := cloneProviderMessage(input[index])
+	survivingToolCallIDs := make(map[string]struct{})
+	for index, message := range input {
 		if strings.TrimSpace(message.Role) != "assistant" || len(message.ToolCalls) == 0 {
+			continue
+		}
+		responded := make(map[string]struct{}, len(message.ToolCalls))
+		for scan := index + 1; scan < providerToolResponseWindowEnd(input, index); scan++ {
+			if strings.TrimSpace(input[scan].Role) != "tool" {
+				continue
+			}
+			if toolCallID := strings.TrimSpace(input[scan].ToolCallID); toolCallID != "" {
+				responded[toolCallID] = struct{}{}
+			}
+		}
+		for _, toolCall := range message.ToolCalls {
+			if toolCallID := strings.TrimSpace(toolCall.ID); toolCallID != "" {
+				if _, ok := responded[toolCallID]; ok {
+					survivingToolCallIDs[toolCallID] = struct{}{}
+				}
+			}
+		}
+	}
+	trimmed := make([]Message, 0, len(input))
+	for _, item := range input {
+		message := cloneProviderMessage(item)
+		if strings.TrimSpace(message.Role) == "assistant" && len(message.ToolCalls) > 0 {
+			nextToolCalls := make([]ToolCallDescriptor, 0, len(message.ToolCalls))
+			for _, toolCall := range message.ToolCalls {
+				if _, ok := survivingToolCallIDs[strings.TrimSpace(toolCall.ID)]; !ok {
+					continue
+				}
+				toolCall.Index = len(nextToolCalls)
+				nextToolCalls = append(nextToolCalls, toolCall)
+			}
+			if len(nextToolCalls) == 0 {
+				if strings.TrimSpace(message.Content) == "" && len(message.ContentParts) == 0 && strings.TrimSpace(message.ReasoningContent) == "" {
+					continue
+				}
+				message.ToolCalls = nil
+			} else {
+				message.ToolCalls = nextToolCalls
+			}
 			trimmed = append(trimmed, message)
 			continue
 		}
-
-		end := index + 1
-		responded := make(map[string]struct{}, len(message.ToolCalls))
-		for end < len(input) && strings.TrimSpace(input[end].Role) == "tool" {
-			toolCallID := strings.TrimSpace(input[end].ToolCallID)
-			if toolCallID != "" {
-				responded[toolCallID] = struct{}{}
-			}
-			end++
-		}
-
-		nextToolCalls := make([]ToolCallDescriptor, 0, len(message.ToolCalls))
-		allowedToolCallIDs := make(map[string]struct{}, len(message.ToolCalls))
-		for _, toolCall := range message.ToolCalls {
-			toolCallID := strings.TrimSpace(toolCall.ID)
-			if _, ok := responded[toolCallID]; !ok {
+		if strings.TrimSpace(message.Role) == "tool" && strings.TrimSpace(message.ToolCallID) != "" {
+			if _, ok := survivingToolCallIDs[strings.TrimSpace(message.ToolCallID)]; !ok {
 				continue
 			}
-			item := toolCall
-			item.Index = len(nextToolCalls)
-			nextToolCalls = append(nextToolCalls, item)
-			allowedToolCallIDs[toolCallID] = struct{}{}
 		}
-
-		if len(nextToolCalls) > 0 {
-			message.ToolCalls = nextToolCalls
-			trimmed = append(trimmed, message)
-			for toolIndex := index + 1; toolIndex < end; toolIndex++ {
-				toolMessage := cloneProviderMessage(input[toolIndex])
-				if _, ok := allowedToolCallIDs[strings.TrimSpace(toolMessage.ToolCallID)]; !ok {
-					continue
-				}
-				trimmed = append(trimmed, toolMessage)
-			}
-		} else if strings.TrimSpace(message.Content) != "" || len(message.ContentParts) > 0 || strings.TrimSpace(message.ReasoningContent) != "" {
-			message.ToolCalls = nil
-			trimmed = append(trimmed, message)
-		}
-
-		index = end - 1
+		trimmed = append(trimmed, message)
 	}
 	return trimmed
 }

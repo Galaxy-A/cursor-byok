@@ -1956,6 +1956,7 @@ func normalizeOpenAIResponsesInput(messages []Message) (string, []map[string]any
 	instructionParts := make([]string, 0, 2)
 	items := make([]map[string]any, 0, len(messages))
 	responsesCallIDs := make(map[string]string)
+	emittedCallIDs := make(map[string]struct{})
 	activeAssistantReasoningKey := ""
 	for _, message := range messages {
 		role := strings.TrimSpace(message.Role)
@@ -1968,6 +1969,22 @@ func normalizeOpenAIResponsesInput(messages []Message) (string, []map[string]any
 		}
 		if role == "tool" && strings.TrimSpace(message.ToolCallID) != "" {
 			callID := openAIResponsesToolMessageCallID(message, responsesCallIDs)
+			if strings.TrimSpace(callID) != "" {
+				if _, ok := emittedCallIDs[callID]; !ok {
+					if name := strings.TrimSpace(message.Name); name != "" {
+						items = append(items, map[string]any{
+							"type":      "function_call",
+							"call_id":   callID,
+							"name":      name,
+							"arguments": "{}",
+							"status":    "completed",
+						})
+						emittedCallIDs[callID] = struct{}{}
+					} else {
+						continue
+					}
+				}
+			}
 			items = append(items, map[string]any{
 				"type":    "function_call_output",
 				"call_id": callID,
@@ -2026,6 +2043,9 @@ func normalizeOpenAIResponsesInput(messages []Message) (string, []map[string]any
 					toolItem["status"] = "completed"
 				}
 				items = append(items, toolItem)
+				if strings.TrimSpace(callID) != "" {
+					emittedCallIDs[strings.TrimSpace(callID)] = struct{}{}
+				}
 			}
 		}
 	}

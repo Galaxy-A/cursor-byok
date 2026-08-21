@@ -2,6 +2,8 @@
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
 import ModelAdapterTestCard from "@/components/ModelAdapterTestCard.vue";
+import { useConfigTransfer } from "@/composables/useConfigTransfer";
+import { useMessage } from "@/composables/useMessage";
 import { showModal } from "@/composables/useModal";
 import Sortable from "sortablejs";
 import {
@@ -20,6 +22,7 @@ import {
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const BATCH_TEST_CONCURRENCY = 10;
+const message = useMessage();
 
 const typeTabs = [
   { label: "全部", value: "all", icon: "icon-[mdi--view-grid-outline]" },
@@ -113,6 +116,15 @@ async function openEditor(index = -1) {
     await showActionError("打开失败", toUserError(error));
   }
 }
+
+const {
+  configTransferBusy,
+  handleExportConfig,
+  handleImportConfig,
+} = useConfigTransfer({
+  showSuccess: (content) => message.success(content),
+  showActionError,
+});
 
 function destroySortable() {
   if (sortable) {
@@ -337,12 +349,26 @@ onBeforeUnmount(() => {
         <div class="center-row gap-2">
           <Button
             variant="default"
-            :disabled="sortSaving || appState.configSaving || (!batchTesting && filteredAdapters.length === 0)"
+            :disabled="sortSaving || appState.configSaving || batchTesting || configTransferBusy || appState.serviceRunning || appState.backendRunning || appState.proxyRunning"
+            @click="handleImportConfig"
+          >
+            导入配置
+          </Button>
+          <Button
+            variant="default"
+            :disabled="sortSaving || appState.configSaving || batchTesting || configTransferBusy"
+            @click="handleExportConfig"
+          >
+            导出配置
+          </Button>
+          <Button
+            variant="default"
+            :disabled="sortSaving || appState.configSaving || configTransferBusy || (!batchTesting && filteredAdapters.length === 0)"
             @click="handleTestAllModelAdapters"
           >
             {{ batchButtonText }}
           </Button>
-          <Button variant="primary" :disabled="sortSaving || appState.configSaving || batchTesting" @click="openEditor()">新增模型</Button>
+          <Button variant="primary" :disabled="sortSaving || appState.configSaving || batchTesting || configTransferBusy" @click="openEditor()">新增模型</Button>
         </div>
       </div>
     </div>
