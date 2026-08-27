@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -10,11 +10,6 @@ use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
-
-use super::ads::{
-    AdDismissalInput, AdRuntime, ADS_ENDPOINT, APP_VERSION_HEADER, DEVICE_ID_HEADER,
-    DISABLED_AD_IDS_HEADER, LANGUAGE_HEADER, OS_HEADER,
-};
 
 use crate::{
     harness::CursorHarness,
@@ -38,6 +33,7 @@ pub struct ControlService {
     cursor_harness: CursorHarness,
     provider: Arc<dyn Provider>,
     model_tests: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+    model_test_timeout: Duration,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -143,77 +139,27 @@ pub struct ObservabilitySettings {
 
 impl ControlService {
     pub fn new(store: Store, provider: Arc<dyn Provider>) -> Result<Self> {
+        Self::new_with_timeout(store, provider, Duration::from_secs(300))
+    }
+
+    pub fn new_with_timeout(
+        store: Store,
+        provider: Arc<dyn Provider>,
+        provider_timeout: Duration,
+    ) -> Result<Self> {
         Ok(Self {
             cursor_harness: CursorHarness::new(store.clone())?,
             store,
             provider,
             model_tests: Arc::new(Mutex::new(BTreeMap::new())),
+            model_test_timeout: provider_timeout
+                .max(Duration::from_secs(300))
+                .saturating_add(Duration::from_secs(60)),
         })
     }
 
     pub fn cursor_harness(&self) -> &CursorHarness {
         &self.cursor_harness
-    }
-
-    pub(super) async fn ads(
-        &self,
-        disabled_ad_ids: Option<&str>,
-        language: &str,
-    ) -> Result<AdRuntime> {
-        let client = crate::network::client(&self.store).await?;
-        let installation_id = self.store.installation_id().await?;
-        let mut request = client
-            .get(ADS_ENDPOINT)
-            .header(DEVICE_ID_HEADER, installation_id)
-            .header(OS_HEADER, std::env::consts::OS)
-            .header(APP_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
-            .header(LANGUAGE_HEADER, language)
-            .timeout(std::time::Duration::from_secs(5));
-        if let Some(disabled_ad_ids) = disabled_ad_ids.filter(|value| !value.is_empty()) {
-            request = request.header(DISABLED_AD_IDS_HEADER, disabled_ad_ids);
-        }
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "advertisement service failed ({status}): {}",
-                message.chars().take(200).collect::<String>()
-            )));
-        }
-        response.json::<AdRuntime>().await?.into_menu_slots()
-    }
-
-    pub(super) async fn dismiss_ad(&self, ad_id: &str, input: &AdDismissalInput) -> Result<()> {
-        let client = crate::network::client(&self.store).await?;
-        let installation_id = self.store.installation_id().await?;
-        let mut endpoint = Url::parse(ADS_ENDPOINT).map_err(|error| {
-            Error::Config(format!("advertisement endpoint is invalid: {error}"))
-        })?;
-        endpoint.set_query(None);
-        endpoint
-            .path_segments_mut()
-            .map_err(|_| Error::Config("advertisement endpoint cannot contain an ad id".into()))?
-            .push(ad_id)
-            .push("dismissals");
-        let response = client
-            .post(endpoint)
-            .header(DEVICE_ID_HEADER, installation_id)
-            .header(OS_HEADER, std::env::consts::OS)
-            .header(APP_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
-            .json(input)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "advertisement dismissal failed ({status}): {}",
-                message.chars().take(200).collect::<String>()
-            )));
-        }
-        Ok(())
     }
 
     pub async fn models(&self) -> Result<Vec<ModelConfig>> {
@@ -289,7 +235,6 @@ impl ControlService {
         model_hash: &str,
         cancellation: CancellationToken,
     ) -> Result<ModelConnectivityResult> {
-        const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
         const TEST_PROMPT: &str = "Output the numbers 1 through 120 separated by a single space. No commas, no newlines, no explanation.";
 
         let configured = self
@@ -326,7 +271,8 @@ impl ControlService {
         let mut output_tokens = None;
         let mut output = String::new();
         let stream = self.provider.stream(invocation, cancellation.clone());
-        let completed = tokio::time::timeout(TEST_TIMEOUT, async {
+        let test_timeout = self.model_test_timeout;
+        let completed = tokio::time::timeout(test_timeout, async {
             futures_util::pin_mut!(stream);
             let mut finished = false;
             while let Some(event) = stream.next().await {
@@ -363,6 +309,10 @@ impl ControlService {
             Ok(result) => result?,
             Err(_) => {
                 cancellation.cancel();
+                let timeout_message = format!(
+                    "model connectivity test timed out after {} seconds",
+                    test_timeout.as_secs()
+                );
                 self.store
                     .finish_llm_call(
                         &call_id,
@@ -370,12 +320,10 @@ impl ControlService {
                         None,
                         started.elapsed().as_millis().min(i64::MAX as u128) as i64,
                         Some("timeout"),
-                        Some("model connectivity test timed out after 45 seconds"),
+                        Some(&timeout_message),
                     )
                     .await?;
-                return Err(Error::Provider(
-                    "model connectivity test timed out after 45 seconds".into(),
-                ));
+                return Err(Error::Provider(timeout_message));
             }
         }
         let elapsed = started.elapsed();
@@ -1087,6 +1035,7 @@ mod tests {
                 sort_order: 0,
                 reasoning_effort: Some("medium".into()),
                 openai_endpoint: "/v1/responses".into(),
+                codex_outbound_enabled: false,
                 openai_extra_params_enabled: false,
                 openai_extra_params: serde_json::json!({}),
                 custom_headers_enabled: false,

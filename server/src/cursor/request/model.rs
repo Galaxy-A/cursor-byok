@@ -28,6 +28,7 @@ pub fn requested_model(request: &pb::AgentRunRequest) -> Result<ModelSpec> {
             max_output_tokens: None,
             context_window_tokens: None,
             supports_image_generation: false,
+            codex_outbound_enabled: false,
             extra_params: serde_json::json!({}),
         }
     } else {
@@ -93,6 +94,7 @@ fn from_requested(
         max_output_tokens: None,
         context_window_tokens: None,
         supports_image_generation: false,
+        codex_outbound_enabled: false,
         extra_params: serde_json::json!({}),
     };
     for parameter in &model.parameters {

@@ -537,6 +537,7 @@ mod tests {
                 sort_order: 0,
                 reasoning_effort: None,
                 openai_endpoint: "/v1/responses".into(),
+                codex_outbound_enabled: false,
                 openai_extra_params_enabled: false,
                 openai_extra_params: serde_json::json!({}),
                 custom_headers_enabled: false,

@@ -11,7 +11,7 @@ use super::{now_ms, Store};
 
 const MODEL_COLUMNS: &str = r#"
     model_hash, sort_order, display_name, model_type, base_url, use_full_url, api_key, tooltip_data,
-    model_id, reasoning_effort, openai_endpoint, openai_extra_params_enabled,
+    model_id, reasoning_effort, openai_endpoint, codex_outbound_enabled, openai_extra_params_enabled,
     openai_extra_params_json, custom_headers_enabled, custom_headers_json,
     anthropic_extra_params_enabled, anthropic_extra_params_json, context_window_tokens,
     max_completion_tokens, anthropic_max_tokens, anthropic_thinking_effort,
@@ -124,7 +124,7 @@ impl Store {
             r#"UPDATE model_configs SET
                 model_hash = ?, sort_order = ?, display_name = ?, model_type = ?, base_url = ?,
                 use_full_url = ?, api_key = ?, tooltip_data = ?, model_id = ?, reasoning_effort = ?,
-                openai_endpoint = ?, openai_extra_params_enabled = ?, openai_extra_params_json = ?,
+                openai_endpoint = ?, codex_outbound_enabled = ?, openai_extra_params_enabled = ?, openai_extra_params_json = ?,
                 custom_headers_enabled = ?, custom_headers_json = ?,
                 anthropic_extra_params_enabled = ?, anthropic_extra_params_json = ?,
                 context_window_tokens = ?, max_completion_tokens = ?, anthropic_max_tokens = ?,
@@ -142,6 +142,7 @@ impl Store {
         .bind(&input.model_id)
         .bind(&input.reasoning_effort)
         .bind(&input.openai_endpoint)
+        .bind(input.codex_outbound_enabled)
         .bind(input.openai_extra_params_enabled)
         .bind(serde_json::to_string(&input.openai_extra_params)?)
         .bind(input.custom_headers_enabled)
@@ -242,12 +243,12 @@ async fn insert_model_with_conflict(
     let mut statement = String::from(
         r#"INSERT INTO model_configs(
             model_hash, sort_order, display_name, model_type, base_url, use_full_url, api_key, tooltip_data,
-            model_id, reasoning_effort, openai_endpoint, openai_extra_params_enabled,
+            model_id, reasoning_effort, openai_endpoint, codex_outbound_enabled, openai_extra_params_enabled,
             openai_extra_params_json, custom_headers_enabled, custom_headers_json,
             anthropic_extra_params_enabled, anthropic_extra_params_json, context_window_tokens,
             max_completion_tokens, anthropic_max_tokens, anthropic_thinking_effort,
             thinking_budget_tokens, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     );
     if ignore_existing {
         statement.push_str(" ON CONFLICT(model_hash) DO NOTHING");
@@ -264,6 +265,7 @@ async fn insert_model_with_conflict(
         .bind(&input.model_id)
         .bind(&input.reasoning_effort)
         .bind(&input.openai_endpoint)
+        .bind(input.codex_outbound_enabled)
         .bind(input.openai_extra_params_enabled)
         .bind(serde_json::to_string(&input.openai_extra_params)?)
         .bind(input.custom_headers_enabled)
@@ -295,6 +297,7 @@ fn model_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ModelConfig> {
         model_id: row.try_get("model_id")?,
         reasoning_effort: row.try_get("reasoning_effort")?,
         openai_endpoint: row.try_get("openai_endpoint")?,
+        codex_outbound_enabled: row.try_get("codex_outbound_enabled")?,
         openai_extra_params_enabled: row.try_get("openai_extra_params_enabled")?,
         openai_extra_params: serde_json::from_str(
             row.try_get::<String, _>("openai_extra_params_json")?
@@ -347,6 +350,7 @@ mod tests {
             model_id: "model-a".into(),
             reasoning_effort: Some("high".into()),
             openai_endpoint: "/v1/responses".into(),
+            codex_outbound_enabled: false,
             openai_extra_params_enabled: true,
             openai_extra_params: serde_json::json!({"service_tier":"priority"}),
             custom_headers_enabled: true,

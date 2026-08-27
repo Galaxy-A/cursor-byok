@@ -178,6 +178,7 @@ async fn records_one_summary_and_raw_payloads_for_one_provider_request() {
             model_id: "actual-model".into(),
             reasoning_effort: None,
             openai_endpoint: OPENAI_CHAT_ENDPOINT.into(),
+            codex_outbound_enabled: false,
             openai_extra_params_enabled: false,
             openai_extra_params: serde_json::json!({}),
             custom_headers_enabled: true,

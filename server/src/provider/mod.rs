@@ -1,4 +1,5 @@
 mod anthropic;
+mod codex;
 mod event;
 mod normalize;
 mod openai_chat;
@@ -48,6 +49,7 @@ fn merge_extra_params(body: &mut serde_json::Value, extra: &serde_json::Value) -
                 | "system"
                 | "instructions"
                 | "prompt_cache_key"
+                | "store"
         ) {
             return Err(crate::Error::Config(format!(
                 "model extra params cannot replace {name}"

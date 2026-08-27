@@ -541,6 +541,7 @@ mod tests {
             model_id: "deepseek-v4-flash".into(),
             reasoning_effort: None,
             openai_endpoint: "/v1/responses".into(),
+            codex_outbound_enabled: false,
             openai_extra_params_enabled: false,
             openai_extra_params: serde_json::json!({}),
             custom_headers_enabled: false,

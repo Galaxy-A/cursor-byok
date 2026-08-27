@@ -87,6 +87,7 @@ mod tests {
                 model_id: "model".into(),
                 reasoning_effort: None,
                 openai_endpoint: OPENAI_CHAT_ENDPOINT.into(),
+                codex_outbound_enabled: false,
                 openai_extra_params_enabled: false,
                 openai_extra_params: serde_json::json!({}),
                 custom_headers_enabled: false,

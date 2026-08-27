@@ -25,6 +25,8 @@ pub struct ModelSpec {
     #[serde(default)]
     pub supports_image_generation: bool,
     #[serde(default)]
+    pub codex_outbound_enabled: bool,
+    #[serde(default)]
     pub extra_params: serde_json::Value,
 }
 
@@ -38,6 +40,7 @@ impl ModelSpec {
             max_output_tokens: None,
             context_window_tokens: None,
             supports_image_generation: false,
+            codex_outbound_enabled: false,
             extra_params: serde_json::json!({}),
         }
     }

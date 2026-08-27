@@ -54,6 +54,8 @@ struct LegacyModel {
     reasoning_effort: String,
     #[serde(rename = "openAIEndpoint", default)]
     openai_endpoint: String,
+    #[serde(rename = "codexOutboundEnabled", default)]
+    codex_outbound_enabled: bool,
     #[serde(rename = "openAIExtraParamsEnabled", default)]
     openai_extra_params_enabled: bool,
     #[serde(rename = "openAIExtraParamsJSON", default)]
@@ -159,6 +161,7 @@ fn model_input(model: LegacyModel) -> Result<ModelConfigInput> {
     };
     let (base_url, openai_endpoint, use_full_url) =
         legacy_request_configuration(model_type, &model.base_url, &model.openai_endpoint)?;
+    let codex_outbound_enabled = model_type == ModelType::OpenAi && model.codex_outbound_enabled;
     Ok(ModelConfigInput {
         sort_order: model.sort,
         display_name: model.display_name.clone(),
@@ -173,7 +176,12 @@ fn model_input(model: LegacyModel) -> Result<ModelConfigInput> {
         },
         model_id: model.model_id,
         reasoning_effort: optional_string(model.reasoning_effort),
-        openai_endpoint,
+        openai_endpoint: if codex_outbound_enabled {
+            OPENAI_RESPONSES_ENDPOINT.into()
+        } else {
+            openai_endpoint
+        },
+        codex_outbound_enabled,
         openai_extra_params_enabled: model.openai_extra_params_enabled,
         openai_extra_params: enabled_json_object(
             model_type == ModelType::OpenAi && model.openai_extra_params_enabled,

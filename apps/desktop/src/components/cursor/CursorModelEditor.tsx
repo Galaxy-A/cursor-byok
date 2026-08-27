@@ -30,6 +30,7 @@ export const emptyCursorModelDraft = (): CursorModelDraft => ({
     model_id: "",
     reasoning_effort: null,
     openai_endpoint: "/v1/responses",
+    codex_outbound_enabled: false,
     openai_extra_params_enabled: false,
     openai_extra_params: {},
     custom_headers_enabled: false,
@@ -80,6 +81,12 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
   };
   const numberValue = (value: string) => value === "" ? null : Math.trunc(Number(value));
   const canDiscover = Boolean(draft.model.base_url.trim() && draft.model.api_key.trim());
+  const setCodexOutbound = (enabled: boolean) => {
+    setModel({
+      codex_outbound_enabled: enabled,
+      ...(enabled ? { openai_endpoint: "/v1/responses" } : {}),
+    });
+  };
   // 选中预设后，把该服务商已知的模型 id 并入下拉，方便直接选（仍可用「获取模型」发现）
   const presetModelOptions = modelPresets
     .filter((preset) => trimTrailingSlash(presetEndpoint(preset, draft.model.type).baseUrl) === trimTrailingSlash(draft.model.base_url.trim()))
@@ -133,7 +140,14 @@ export function CursorModelEditor({ draft, modelOptions, discovering, onChange, 
       {draft.model.type === "openai" && <FormField label={t("请求协议")} hint={t("只决定请求与响应的格式，不会改变请求地址。")}> <Select ariaLabel={t("请求协议")} value={draft.model.openai_endpoint} options={[
         { value: "/v1/responses", label: "Responses API" },
         { value: "/v1/chat/completions", label: "Chat Completions API" },
-      ]} onChange={(openai_endpoint) => setModel({ openai_endpoint })} /></FormField>}
+      ]} disabled={draft.model.codex_outbound_enabled} onChange={(openai_endpoint) => setModel({ openai_endpoint })} /></FormField>}
+      {draft.model.type === "openai" && <div className={styles.fullWidth}>
+        <Switch
+          label={t("启用 Codex 出站协议")}
+          checked={draft.model.codex_outbound_enabled}
+          onChange={setCodexOutbound}
+        />
+      </div>}
 
       <div className={styles.urlField}>
         <FormField label={draft.model.use_full_url ? t("完整请求 URL") : t("服务器地址")} hint={draft.model.use_full_url ? t("系统会原样使用此地址，不追加或修改请求路径。") : t("系统会根据请求协议自动追加标准端点路径。")}> <TextInput placeholder={requestUrlPlaceholder} value={draft.model.base_url} onChange={(event) => setModel({ base_url: event.target.value })} /></FormField>

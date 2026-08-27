@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    apply_openai_prompt_cache_key, merge_extra_params, recorder::recorded_headers, CallRecorder,
-    FinishReason, ModelEvent, Provider, ProviderStream,
+    apply_openai_prompt_cache_key, codex, merge_extra_params, recorder::recorded_headers,
+    CallRecorder, FinishReason, ModelEvent, Provider, ProviderStream,
 };
 
 #[derive(Default)]
@@ -64,7 +64,8 @@ impl Provider for OpenAiResponsesProvider {
         let config = self.config.clone();
         let recorder = self.recorder.clone();
         Box::pin(try_stream! {
-            let ModelInvocation { call_id, request, .. } = invocation;
+            let call_id = invocation.call_id.clone();
+            let request = &invocation.request;
             let input = responses_input(&request.history)?;
             let mut body = json!({
                 "model": request.model.model_id, "input": input, "stream": true,
@@ -78,11 +79,44 @@ impl Provider for OpenAiResponsesProvider {
             apply_model(&mut body, &request.model, config.max_output_tokens)?;
             merge_extra_params(&mut body, &request.model.extra_params)?;
             apply_openai_prompt_cache_key(&mut body, &request.model.model_id)?;
+            let codex_identity = request.model.codex_outbound_enabled.then(|| codex::identity(&invocation));
+            if request.model.codex_outbound_enabled {
+                codex::apply_body(&mut body, &invocation);
+            }
             if let Some(recorder) = &recorder {
-                recorder.request(recorded_headers(&config, &[("content-type", "application/json")]), &body).await?;
+                let mut headers = recorded_headers(&config, &[("content-type", "application/json")]);
+                if let Some(identity) = &codex_identity {
+                    if let Some(object) = headers.as_object_mut() {
+                        object.insert("User-Agent".into(), codex::CODEX_CLI_USER_AGENT.into());
+                        object.insert("originator".into(), codex::CODEX_CLI_ORIGINATOR.into());
+                        object.insert("Accept".into(), "text/event-stream".into());
+                        object.insert("session-id".into(), identity.session_id.clone().into());
+                        object.insert("thread-id".into(), identity.thread_id.clone().into());
+                        object.insert("x-client-request-id".into(), identity.thread_id.clone().into());
+                        object.insert("x-codex-installation-id".into(), identity.installation_id.clone().into());
+                        object.insert("x-codex-window-id".into(), identity.window_id.clone().into());
+                        object.insert("x-codex-turn-metadata".into(), identity.turn_metadata.clone().into());
+                        for (name, value) in &config.custom_headers {
+                            if crate::model::is_sensitive_header(name.as_str()) {
+                                continue;
+                            }
+                            if let Ok(value) = value.to_str() {
+                                object.insert(name.as_str().into(), value.into());
+                            }
+                        }
+                    }
+                }
+                recorder.request(headers, &body).await?;
+            }
+            let mut headers = config.custom_headers.clone();
+            if let Some(identity) = &codex_identity {
+                codex::apply_headers(&mut headers, identity);
+                for (name, value) in &config.custom_headers {
+                    headers.insert(name.clone(), value.clone());
+                }
             }
             let request = client.post(&config.request_url)
-                .bearer_auth(&config.api_key).headers(config.custom_headers.clone()).json(&body).send();
+                .bearer_auth(&config.api_key).headers(headers).json(&body).send();
             let response = tokio::select! {
                 _ = cancellation.cancelled() => return,
                 response = request => response,

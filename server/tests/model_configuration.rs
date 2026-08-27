@@ -25,6 +25,7 @@ fn model_input() -> ModelConfigInput {
         model_id: "model-a".into(),
         reasoning_effort: None,
         openai_endpoint: OPENAI_CHAT_ENDPOINT.into(),
+        codex_outbound_enabled: false,
         openai_extra_params_enabled: true,
         openai_extra_params: serde_json::json!({"temperature":0}),
         custom_headers_enabled: true,

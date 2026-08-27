@@ -43,7 +43,11 @@ impl App {
         let run_registry = RunRegistry::default();
         let registry =
             CursorSessionRegistry::new(store.clone(), provider.clone(), compiler, run_registry);
-        let control = control::ControlService::new(store.clone(), provider)?;
+        let control = control::ControlService::new_with_timeout(
+            store.clone(),
+            provider,
+            config.provider_request_timeout,
+        )?;
         let harness = control.cursor_harness().clone();
         let mut router = handlers::router(registry.clone())?;
         router = match &config.console {

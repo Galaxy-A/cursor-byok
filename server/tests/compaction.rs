@@ -31,6 +31,7 @@ async fn summarize_replaces_model_history_and_preserves_cursor_history() {
             model_id: "test-model".into(),
             reasoning_effort: None,
             openai_endpoint: OPENAI_CHAT_ENDPOINT.into(),
+            codex_outbound_enabled: false,
             openai_extra_params_enabled: false,
             openai_extra_params: serde_json::json!({}),
             custom_headers_enabled: false,

@@ -94,6 +94,8 @@ pub struct ModelConfigInput {
     #[serde(default)]
     pub openai_endpoint: String,
     #[serde(default)]
+    pub codex_outbound_enabled: bool,
+    #[serde(default)]
     pub openai_extra_params_enabled: bool,
     #[serde(default = "empty_object")]
     pub openai_extra_params: serde_json::Value,
@@ -127,6 +129,7 @@ pub struct ModelConfig {
     pub model_id: String,
     pub reasoning_effort: Option<String>,
     pub openai_endpoint: String,
+    pub codex_outbound_enabled: bool,
     pub openai_extra_params_enabled: bool,
     pub openai_extra_params: serde_json::Value,
     pub custom_headers_enabled: bool,
@@ -188,6 +191,7 @@ impl ModelConfig {
             };
         }
         model.reasoning.enabled |= model.reasoning.effort.is_some();
+        model.codex_outbound_enabled = self.codex_outbound_enabled;
     }
 }
 
@@ -208,9 +212,16 @@ pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInpu
         ),
         ModelType::OpenAi => None,
     };
-    let openai_endpoint = match input.model_type {
+    let requested_openai_endpoint = match input.model_type {
         ModelType::OpenAi => normalize_openai_endpoint(&input.openai_endpoint)?,
         ModelType::Anthropic => String::new(),
+    };
+    let codex_outbound_enabled =
+        input.model_type == ModelType::OpenAi && input.codex_outbound_enabled;
+    let openai_endpoint = if codex_outbound_enabled {
+        OPENAI_RESPONSES_ENDPOINT.into()
+    } else {
+        requested_openai_endpoint
     };
     validate_object(&input.openai_extra_params, "OpenAI extra params")?;
     validate_object(&input.anthropic_extra_params, "Anthropic extra params")?;
@@ -229,6 +240,7 @@ pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInpu
             .then_some(reasoning_effort)
             .flatten(),
         openai_endpoint,
+        codex_outbound_enabled,
         openai_extra_params_enabled: input.model_type == ModelType::OpenAi
             && input.openai_extra_params_enabled,
         openai_extra_params: if input.model_type == ModelType::OpenAi {
@@ -429,6 +441,7 @@ mod tests {
             model_id: "model-a".into(),
             reasoning_effort: Some("high".into()),
             openai_endpoint: OPENAI_RESPONSES_ENDPOINT.into(),
+            codex_outbound_enabled: false,
             openai_extra_params_enabled: false,
             openai_extra_params: empty_object(),
             custom_headers_enabled: false,
