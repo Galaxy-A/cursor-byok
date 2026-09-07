@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - "Test/**"
 
 permissions:
   contents: read
@@ -64,6 +65,9 @@ jobs:
         working-directory: apps/desktop
         run: npm run check
 
+      - name: Check release configuration
+        run: node --test .github/scripts/*.test.mjs
+
   desktop-rust:
     name: Desktop Rust (${{ matrix.os }})
     strategy:
@@ -86,3 +90,112 @@ jobs:
 
       - name: Run platform Clippy
         run: cargo clippy --package cursor-byok-desktop --all-targets -- -D warnings
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build desktop without packaging
+        working-directory: apps/desktop
+        run: npm run tauri:build -- --debug --no-bundle
+
+  package:
+    name: Package (${{ matrix.platform }})
+    needs: [rust, frontend, desktop-rust]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/Test/') && github.repository == 'Galaxy-A/cursor-byok'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-22.04
+            args: ""
+            target: ""
+          - platform: windows-x86_64
+            os: windows-latest
+            args: "--bundles nsis"
+            target: ""
+          - platform: macos-aarch64
+            os: macos-15
+            args: "--target aarch64-apple-darwin"
+            target: aarch64-apple-darwin
+          - platform: macos-x86_64
+            os: macos-15-intel
+            args: "--target x86_64-apple-darwin"
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify signing key is configured
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is required for packaging validation" >&2
+            exit 1
+          fi
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build signed bundles without creating a release
+        id: bundle
+        uses: tauri-apps/tauri-action@v1
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ contains(matrix.platform, 'macos') && '-' || '' }}
+        with:
+          projectPath: apps/desktop
+          args: ${{ matrix.args }}
+
+      - name: Collect bundle paths
+        id: artifacts
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.bundle.outputs.artifactPaths }}
+        run: |
+          node --input-type=module -e '
+            import { appendFileSync } from "node:fs";
+            const paths = JSON.parse(process.env.ARTIFACT_PATHS);
+            if (!Array.isArray(paths) || paths.length === 0) throw new Error("No bundles produced");
+            appendFileSync(process.env.GITHUB_OUTPUT, `paths<<BUNDLE_PATHS\n${paths.join("\n")}\nBUNDLE_PATHS\n`);
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-validation-${{ matrix.platform }}
+          path: ${{ steps.artifacts.outputs.paths }}
+          if-no-files-found: error
+          retention-days: 7

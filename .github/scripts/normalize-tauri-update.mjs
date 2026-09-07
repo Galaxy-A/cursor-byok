@@ -35,6 +35,16 @@ export function normalizeTauriUpdate(manifest, release, repository, version) {
   if (!manifest.platforms || typeof manifest.platforms !== "object") {
     throw new Error("updater manifest has no platforms");
   }
+  for (const platform of [
+    "linux-x86_64",
+    "windows-x86_64",
+    "darwin-aarch64",
+    "darwin-x86_64",
+  ]) {
+    if (!Object.hasOwn(manifest.platforms, platform)) {
+      throw new Error(`updater manifest is missing required platform ${platform}`);
+    }
+  }
 
   const assetsBySourceUrl = new Map();
   const publicAssetUrls = new Set();
