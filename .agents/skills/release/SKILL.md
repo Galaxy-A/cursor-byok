@@ -9,8 +9,8 @@ Release through `.github/workflows/release.yml`. Preserve both updater formats: 
 
 ## Publication authority
 
-- Only the repository author, GitHub user `leookun`, may authorize a live release.
-- Before any live mutation, require an explicit release instruction from the author in the current task and verify `gh api user --jq .login` returns `leookun`.
+- Only the fork owner, GitHub user `Galaxy-A`, may authorize a live release of `Galaxy-A/cursor-byok`.
+- Before any live mutation, require an explicit release instruction from the owner in the current task and verify `gh api user --jq .login` returns `Galaxy-A` and the target repository is `Galaxy-A/cursor-byok`. Never publish to the upstream repository.
 - Treat all of these as publication actions: pushing a `v*` tag, rerunning the release workflow, and publishing or editing a GitHub Release. Pushing a release commit to `main` only prepares the release and must never trigger publication by itself.
 - Without that authorization, restrict work to inspection, local edits, validation, and a release-ready commit or branch. Do not infer publication permission from requests such as “prepare”, “check”, or “ready to release”.
 - Never print, commit, or upload `.tauri/cursor-byok.key` anywhere except the repository's `TAURI_SIGNING_PRIVATE_KEY` Actions Secret when the author explicitly requests that secret configuration.
@@ -40,7 +40,7 @@ cursor-byok/
 │   └── src-tauri/
 │       ├── Cargo.toml
 │       └── tauri.conf.json
-├── scripts/cursor-proto/proto/
+├── protocols/cursor/
 │   ├── agent_v1.proto
 │   └── aiserver_v1.proto
 └── .github/workflows/release.yml
@@ -55,7 +55,7 @@ The two listed Proto files are required build inputs and must be committed. Keep
 3. Confirm the updater public key in `tauri.conf.json` matches `.tauri/cursor-byok.key.pub` without exposing the private key.
 4. Confirm `TAURI_SIGNING_PRIVATE_KEY` exists in GitHub Actions. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` must be absent when the local key has no password.
 5. Confirm neither the intended tag nor Release already exists.
-6. From `apps/desktop`, run:
+6. Run the checks below in GitHub Actions when cloud compilation is requested. Require the CI run for the exact release commit to succeed before pushing its tag. Local checks do not substitute for requested platform builds. From `apps/desktop`, run:
 
    ```bash
    npm run check
@@ -64,6 +64,8 @@ The two listed Proto files are required build inputs and must be committed. Keep
 
 7. Validate the workflow YAML and inspect the staged diff. Ensure `.tauri/`, unrelated local files, and unrelated user changes are not staged.
 8. Use the `tauri-action@v1` input `uploadUpdaterJson: true`; `includeUpdaterJson` is not a valid v1 input.
+9. Both the installer updater endpoint in `tauri.conf.json` and the Windows portable endpoint in `src/update/mod.rs` must resolve to `Galaxy-A/cursor-byok`. Verify `portable-latest.json` as well as `latest.json` and `update.json`.
+10. Upstream and fork release tags may have the same name but different commits. Create fork release tags in an isolated release clone; never move an existing upstream tag or push all tags.
 
 ## Publish and verify
 

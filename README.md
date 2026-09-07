@@ -6,16 +6,20 @@ cursor-byok is a local implementation of Cursor's backend.
 <br>
 <a href="https://trendshift.io/repositories/39260?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-39260" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/39260" alt="leookun/cursor-byok | Trendshift" width="250" height="55" /></a>
 
-[User Guide](https://docs.leokun.cn) · [Download](https://github.com/leookun/cursor-byok/releases/latest) · [Report an Issue](https://github.com/leookun/cursor-byok/issues) · [中文版本说明](./README-CN.md)
+[User Guide](https://docs.leokun.cn) · [Download](https://github.com/Galaxy-A/cursor-byok/releases/latest) · [Report an Issue](https://github.com/Galaxy-A/cursor-byok/issues) · [中文版本说明](./README-CN.md)
 
-[![Release](https://img.shields.io/github/v/release/leookun/cursor-byok?style=flat-square)](https://github.com/leookun/cursor-byok/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/leookun/cursor-byok/total?style=flat-square)](https://github.com/leookun/cursor-byok/releases)
+[![Release](https://img.shields.io/github/v/release/Galaxy-A/cursor-byok?style=flat-square)](https://github.com/Galaxy-A/cursor-byok/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Galaxy-A/cursor-byok/total?style=flat-square)](https://github.com/Galaxy-A/cursor-byok/releases)
 [![License](https://img.shields.io/github/license/leookun/cursor-byok?style=flat-square)](./LICENSE)
-[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/leookun/cursor-byok/releases/latest)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/Galaxy-A/cursor-byok/releases/latest)
 
 
 
 </div>
+
+## Fork
+
+This repository is the Galaxy-A fork of [leookun/cursor-byok](https://github.com/leookun/cursor-byok), based on upstream `v0.1.7` (`9637efd`). It retains Codex outbound configuration, removes in-app advertisements, and uses its own release and updater channels. Upstream authorship and the MIT license remain unchanged.
 
 ![Connect cursor-byok to a wide range of model APIs](./images/en-brand-1.png)
 
@@ -42,7 +46,7 @@ You can connect OpenAI- and Anthropic-compatible services, customize endpoints, 
 
 ## Quick Start
 
-1. Download the latest build for your platform from [GitHub Releases](https://github.com/leookun/cursor-byok/releases/latest).
+1. Download the latest build for your platform from [GitHub Releases](https://github.com/Galaxy-A/cursor-byok/releases/latest).
 2. Launch cursor-byok, open **Model Settings**, and enter the endpoint, API key, and model ID.
 3. Test the model configuration. Once it passes, return to the dashboard and start the service.
 4. Test the model configuration. Once it passes, return to the dashboard and start the service.
@@ -87,7 +91,7 @@ See the [release roadmap](https://github.com/leookun/cursor-byok/discussions/32)
 ## Community and Support
 
 - [User Guide](https://docs.leokun.cn)
-- [GitHub Issues](https://github.com/leookun/cursor-byok/issues)
+- [GitHub Issues](https://github.com/Galaxy-A/cursor-byok/issues)
 - [Telegram community](https://t.me/cursor_byok)
 - QQ groups: `1095916242`, `1094411438`, `1095918002`, `1094419321`
 
