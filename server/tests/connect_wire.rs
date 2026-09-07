@@ -1,3 +1,4 @@
+//! Verifies captured Cursor Connect framing and protobuf compatibility.
 #[path = "support/fake_cursor.rs"]
 mod fake_cursor;
 #[path = "support/fake_provider.rs"]
@@ -13,12 +14,14 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use cursor_server::{
+    api::cursor,
     cursor::prompting::{PromptAssets, PromptCompiler},
-    cursor::CursorSessionRegistry,
-    cursor::{
-        connect, handlers,
+    cursor::protocol::{
+        connect,
         proto::{agent::v1 as pb, aiserver::v1 as ai},
     },
+    cursor::transport::TransportRegistry,
+    network::NetworkClients,
 };
 use flate2::{write::GzEncoder, Compression};
 use prost::Message;
@@ -100,11 +103,11 @@ async fn bidi_append_gzip_body_is_decompressed_before_protobuf_decode() {
             .as_path(),
     )
     .unwrap();
-    let registry = CursorSessionRegistry::new(
+    let clients = NetworkClients::new(store.clone());
+    let registry = TransportRegistry::new(
         store,
         Arc::new(fake_provider::FakeProvider::default()),
         PromptCompiler::new(assets),
-        Default::default(),
     );
     let wire = ai::BidiAppendRequest {
         request_id: Some(ai::BidiRequestId {
@@ -117,7 +120,7 @@ async fn bidi_append_gzip_body_is_decompressed_before_protobuf_decode() {
     encoder.write_all(&wire).unwrap();
     let compressed = encoder.finish().unwrap();
 
-    let response = handlers::router(registry)
+    let response = cursor::router(registry, clients)
         .unwrap()
         .oneshot(
             Request::post("/aiserver.v1.BidiService/BidiAppend")

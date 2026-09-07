@@ -1,3 +1,4 @@
+//! Compiles stable Prompt specifications for Cursor modes.
 use std::collections::BTreeMap;
 
 use crate::{

@@ -1,3 +1,4 @@
+//! Implements provider call inspection endpoints.
 use axum::{
     extract::{Path, Query, State},
     Json,

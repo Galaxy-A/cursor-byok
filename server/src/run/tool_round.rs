@@ -1,15 +1,17 @@
+//! Executes one logical round of Tool calls and results.
+use std::collections::HashSet;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    client::{
-        ClientCommand, ClientEvent, ClientPort, CommitBarrier, CommitCause, MessageInsertion,
-        StateCommitted,
-    },
-    model::{PreparedRun, RevisionId, ToolCall, ToolRoundAssistant, ToolRoundId},
+    model::{CheckpointId, PreparedRun, ToolCall, ToolResult, ToolRoundAssistant, ToolRoundId},
     store::Store,
 };
 
-use super::{RunFailure, RunOutcome};
+use super::{
+    CommitBarrier, CommitCause, MessageBatch, MessagesCommitted, RunCommand, RunEvent, RunFailure,
+    RunOutcome, RunPort,
+};
 
 pub(super) struct ToolRound {
     pub id: ToolRoundId,
@@ -21,12 +23,12 @@ pub(super) struct ToolRound {
 pub(super) async fn execute(
     store: &Store,
     prepared: &PreparedRun,
-    client: &mut ClientPort,
+    client: &mut RunPort,
     cancellation: &CancellationToken,
-    mut revision: RevisionId,
+    mut checkpoint: CheckpointId,
     round: ToolRound,
-    insertions: Vec<MessageInsertion>,
-) -> std::result::Result<RevisionId, RunOutcome> {
+    insertions: Vec<MessageBatch>,
+) -> std::result::Result<CheckpointId, RunOutcome> {
     let ToolRound {
         id: round_id,
         assistant,
@@ -37,7 +39,7 @@ pub(super) async fn execute(
         .create_tool_round(
             &round_id,
             &prepared.run_id,
-            revision,
+            checkpoint,
             &assistant,
             &calls,
             recovered_started_at_ms,
@@ -46,14 +48,14 @@ pub(super) async fn execute(
         .map_err(failed)?;
     tracing::info!(
         round_id = %round_id,
-        revision_id = revision.0,
+        checkpoint_id = checkpoint.0,
         calls = calls.len(),
         "tool round started"
     );
     send(
         client,
-        ClientEvent::StateCommitted(StateCommitted {
-            revision_id: revision,
+        RunEvent::MessagesCommitted(MessagesCommitted {
+            checkpoint_id: checkpoint,
             tool_round_version: 0,
             cause: CommitCause::ToolRoundStarted(round_id.clone()),
             barrier: CommitBarrier::None,
@@ -62,7 +64,7 @@ pub(super) async fn execute(
     .await?;
     send(
         client,
-        ClientEvent::ExecuteToolRound {
+        RunEvent::ExecuteToolRound {
             round_id: round_id.clone(),
             calls: calls.clone(),
         },
@@ -70,18 +72,19 @@ pub(super) async fn execute(
     .await?;
 
     let mut remaining = calls.len();
-    let mut pending_runtime_messages = insertions
-        .into_iter()
-        .map(PendingRuntimeMessage::Insertion)
-        .collect::<Vec<_>>();
+    let mut completed_call_ids = HashSet::new();
+    let mut pending_insertions = insertions;
     while remaining > 0 {
         let command = tokio::select! {
             _ = cancellation.cancelled() => return Err(RunOutcome::Cancelled),
             command = client.commands.recv() => command,
         };
         match command {
-            Some(ClientCommand::ToolResult(result)) => {
+            Some(RunCommand::ToolResult(result)) => {
                 let call_id = result.call_id.clone();
+                if completed_call_ids.contains(&call_id) {
+                    continue;
+                }
                 let committed = store
                     .commit_tool_result(
                         &prepared.conversation_id,
@@ -91,11 +94,12 @@ pub(super) async fn execute(
                     )
                     .await
                     .map_err(failed)?;
-                revision = committed.revision_id;
+                checkpoint = committed.checkpoint_id;
+                completed_call_ids.insert(call_id.clone());
                 tracing::info!(
                     round_id = %round_id,
                     call_id,
-                    revision_id = revision.0,
+                    checkpoint_id = checkpoint.0,
                     tool_round_version = committed.tool_round_version,
                     completion_seq = committed.completion_seq,
                     settled = committed.settled,
@@ -110,10 +114,13 @@ pub(super) async fn execute(
                 };
                 send(
                     client,
-                    ClientEvent::StateCommitted(StateCommitted {
-                        revision_id: revision,
+                    RunEvent::MessagesCommitted(MessagesCommitted {
+                        checkpoint_id: checkpoint,
                         tool_round_version: committed.tool_round_version,
-                        cause: CommitCause::ToolResult { call_id },
+                        cause: CommitCause::ToolResult {
+                            call_id,
+                            interrupted: false,
+                        },
                         barrier,
                     }),
                 )
@@ -122,59 +129,91 @@ pub(super) async fn execute(
                     super::engine::wait_for_state_ready(ready, cancellation).await?;
                 }
             }
-            Some(ClientCommand::RuntimeEvent(event)) => {
-                pending_runtime_messages.push(PendingRuntimeMessage::Message(event.into_message()));
+            Some(RunCommand::BreakMessages(messages)) => {
+                for call in calls
+                    .iter()
+                    .filter(|call| !completed_call_ids.contains(&call.call_id))
+                {
+                    let result = ToolResult {
+                        call_id: call.call_id.clone(),
+                        content: "Tool execution was interrupted by a newer user message.".into(),
+                        is_error: true,
+                        image: None,
+                    };
+                    let committed = store
+                        .commit_tool_result(
+                            &prepared.conversation_id,
+                            &prepared.run_id,
+                            &round_id,
+                            &result,
+                        )
+                        .await
+                        .map_err(failed)?;
+                    checkpoint = committed.checkpoint_id;
+                    let (barrier, ready) = if committed.settled {
+                        let (barrier, ready) = CommitBarrier::before_continue();
+                        (barrier, Some(ready))
+                    } else {
+                        (CommitBarrier::None, None)
+                    };
+                    send(
+                        client,
+                        RunEvent::MessagesCommitted(MessagesCommitted {
+                            checkpoint_id: checkpoint,
+                            tool_round_version: committed.tool_round_version,
+                            cause: CommitCause::ToolResult {
+                                call_id: call.call_id.clone(),
+                                interrupted: true,
+                            },
+                            barrier,
+                        }),
+                    )
+                    .await?;
+                    if let Some(ready) = ready {
+                        super::engine::wait_for_state_ready(ready, cancellation).await?;
+                    }
+                }
+                checkpoint = super::messages::append_batches(
+                    store,
+                    prepared,
+                    client,
+                    cancellation,
+                    checkpoint,
+                    pending_insertions,
+                )
+                .await?
+                .0;
+                checkpoint = super::messages::append_batches(
+                    store,
+                    prepared,
+                    client,
+                    cancellation,
+                    checkpoint,
+                    vec![messages],
+                )
+                .await?
+                .0;
+                return Ok(checkpoint);
             }
-            Some(ClientCommand::RuntimeMessage(message)) => {
-                pending_runtime_messages.push(PendingRuntimeMessage::Message(message));
-            }
-            Some(ClientCommand::InsertMessages(insertion)) => {
-                pending_runtime_messages.push(PendingRuntimeMessage::Insertion(insertion))
-            }
-            Some(ClientCommand::Cancel) => return Err(RunOutcome::Cancelled),
-            Some(ClientCommand::ClientClosed { error }) => {
-                return Err(RunOutcome::Failed(RunFailure::Client(error)));
-            }
+            Some(RunCommand::InsertMessages(insertion)) => pending_insertions.push(insertion),
+            Some(RunCommand::Cancel) => return Err(RunOutcome::Cancelled),
             None => return Err(client_failure()),
         }
     }
-    for pending in pending_runtime_messages {
-        match pending {
-            PendingRuntimeMessage::Message(message) => {
-                revision = super::engine::append_runtime_message(
-                    store,
-                    prepared,
-                    client,
-                    cancellation,
-                    revision,
-                    message,
-                )
-                .await?
-                .0;
-            }
-            PendingRuntimeMessage::Insertion(insertion) => {
-                revision = super::engine::append_insertions(
-                    store,
-                    prepared,
-                    client,
-                    cancellation,
-                    revision,
-                    vec![insertion],
-                )
-                .await?
-                .0;
-            }
-        }
-    }
-    Ok(revision)
+    checkpoint = super::messages::append_batches(
+        store,
+        prepared,
+        client,
+        cancellation,
+        checkpoint,
+        pending_insertions,
+    )
+    .await?
+    .0;
+    Ok(checkpoint)
 }
 
-enum PendingRuntimeMessage {
-    Message(crate::model::CanonicalMessage),
-    Insertion(MessageInsertion),
-}
-
-async fn send(client: &ClientPort, event: ClientEvent) -> std::result::Result<(), RunOutcome> {
+async fn send(client: &RunPort, event: RunEvent) -> std::result::Result<(), RunOutcome> {
     client
         .events
         .send(event)

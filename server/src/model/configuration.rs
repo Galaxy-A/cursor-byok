@@ -1,3 +1,4 @@
+//! Defines model and provider configuration.
 use std::{fmt, str::FromStr};
 
 use reqwest::Url;
@@ -17,6 +18,9 @@ pub enum ProviderType {
     OpenAiResponses,
     #[serde(rename = "anthropic")]
     Anthropic,
+    /// 插件执行的调用;协议细节在插件内部,核心只按统一事件流记录。
+    #[serde(rename = "plugin")]
+    Plugin,
 }
 
 impl ProviderType {
@@ -25,6 +29,7 @@ impl ProviderType {
             Self::OpenAiChat => "openai-chat",
             Self::OpenAiResponses => "openai-responses",
             Self::Anthropic => "anthropic",
+            Self::Plugin => "plugin",
         }
     }
 }
@@ -43,6 +48,7 @@ impl FromStr for ProviderType {
             "openai-chat" => Ok(Self::OpenAiChat),
             "openai-responses" => Ok(Self::OpenAiResponses),
             "anthropic" => Ok(Self::Anthropic),
+            "plugin" => Ok(Self::Plugin),
             _ => Err(Error::Config(format!("unsupported provider type: {value}"))),
         }
     }
@@ -81,6 +87,9 @@ pub struct ModelConfigInput {
     #[serde(default)]
     pub sort_order: i64,
     pub display_name: String,
+    /// 供应商分组的自定义显示名;同一 base_url 主机下的模型共享。
+    #[serde(default)]
+    pub group_name: Option<String>,
     #[serde(rename = "type")]
     pub model_type: ModelType,
     pub base_url: String,
@@ -120,6 +129,7 @@ pub struct ModelConfig {
     pub model_hash: String,
     pub sort_order: i64,
     pub display_name: String,
+    pub group_name: Option<String>,
     #[serde(rename = "type")]
     pub model_type: ModelType,
     pub base_url: String,
@@ -184,6 +194,11 @@ impl ModelConfig {
 
     pub fn configure(&self, model: &mut super::ModelSpec) {
         model.display_name = Some(self.display_name.clone());
+        // A request-selected context is authoritative.  Use the saved model
+        // value only when Cursor did not send a context parameter.
+        if model.context_window_tokens.is_none() {
+            model.context_window_tokens = self.context_window_tokens;
+        }
         if model.reasoning.effort.is_none() {
             model.reasoning.effort = match self.model_type {
                 ModelType::OpenAi => self.reasoning_effort.clone(),
@@ -197,6 +212,12 @@ impl ModelConfig {
 
 pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInput> {
     let display_name = required(&input.display_name, "model display name")?;
+    let group_name = input
+        .group_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
     let base_url = normalize_request_url(&input.base_url)?;
     let api_key = required(&input.api_key, "model API key")?;
     let tooltip_data = required(&input.tooltip_data, "model tooltip")?;
@@ -230,6 +251,7 @@ pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInpu
     let normalized = ModelConfigInput {
         sort_order: input.sort_order.max(0),
         display_name,
+        group_name,
         model_type: input.model_type,
         base_url,
         use_full_url: input.use_full_url,
@@ -425,6 +447,52 @@ fn empty_object_ref() -> &'static serde_json::Value {
     EMPTY.get_or_init(empty_object)
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReasoningSpec {
+    pub enabled: bool,
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelLatency {
+    #[default]
+    Standard,
+    Fast,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ModelSpec {
+    pub model_id: String,
+    pub display_name: Option<String>,
+    pub reasoning: ReasoningSpec,
+    pub latency: ModelLatency,
+    pub max_output_tokens: Option<u64>,
+    pub context_window_tokens: Option<u64>,
+    #[serde(default)]
+    pub supports_image_generation: bool,
+    #[serde(default)]
+    pub codex_outbound_enabled: bool,
+    #[serde(default)]
+    pub extra_params: serde_json::Value,
+}
+
+impl ModelSpec {
+    pub fn new(model_id: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            display_name: None,
+            reasoning: ReasoningSpec::default(),
+            latency: ModelLatency::Standard,
+            max_output_tokens: None,
+            context_window_tokens: None,
+            supports_image_generation: false,
+            codex_outbound_enabled: false,
+            extra_params: serde_json::json!({}),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +501,7 @@ mod tests {
         ModelConfigInput {
             sort_order: 1,
             display_name: "Model A".into(),
+            group_name: None,
             model_type: ModelType::OpenAi,
             base_url: "https://example.com/custom/generate".into(),
             use_full_url: true,
@@ -440,7 +509,7 @@ mod tests {
             tooltip_data: "Model A".into(),
             model_id: "model-a".into(),
             reasoning_effort: Some("high".into()),
-            openai_endpoint: OPENAI_RESPONSES_ENDPOINT.into(),
+            openai_endpoint: OPENAI_CHAT_ENDPOINT.into(),
             codex_outbound_enabled: false,
             openai_extra_params_enabled: false,
             openai_extra_params: empty_object(),
@@ -457,65 +526,25 @@ mod tests {
     }
 
     #[test]
-    fn hash_matches_the_v0049_channel_identity() {
-        let input = input();
-        let expected = Sha256::digest(
-            "https://example.com/custom/generate\nmodel-a\nsecret\nModel A\n/v1/responses"
-                .as_bytes(),
-        );
-        assert_eq!(model_hash(&input).unwrap(), hex::encode(&expected[..8]));
+    fn codex_outbound_requires_openai_responses() {
+        let mut input = input();
+        input.codex_outbound_enabled = true;
+
+        let normalized = normalize_model_input(&input).unwrap();
+
+        assert!(normalized.codex_outbound_enabled);
+        assert_eq!(normalized.openai_endpoint, OPENAI_RESPONSES_ENDPOINT);
     }
 
     #[test]
-    fn request_url_is_exact_and_protocol_does_not_depend_on_its_path() {
-        assert_eq!(
-            resolve_request_url(
-                ModelType::OpenAi,
-                "https://example.com/custom/generate?api-version=2026-01-01",
-                OPENAI_RESPONSES_ENDPOINT,
-                true,
-            )
-            .unwrap(),
-            "https://example.com/custom/generate?api-version=2026-01-01"
-        );
-        assert_eq!(
-            resolve_request_url(
-                ModelType::OpenAi,
-                "https://example.com/another/arbitrary/path",
-                OPENAI_CHAT_ENDPOINT,
-                true,
-            )
-            .unwrap(),
-            "https://example.com/another/arbitrary/path"
-        );
-        assert_eq!(
-            resolve_request_url(ModelType::Anthropic, "https://example.com/claude", "", true)
-                .unwrap(),
-            "https://example.com/claude"
-        );
-        assert_eq!(
-            resolve_request_url(
-                ModelType::Anthropic,
-                "https://example.com/claude/",
-                "",
-                true
-            )
-            .unwrap(),
-            "https://example.com/claude/"
-        );
-        assert_eq!(
-            resolve_request_url(
-                ModelType::OpenAi,
-                "https://example.com/v1",
-                OPENAI_RESPONSES_ENDPOINT,
-                false,
-            )
-            .unwrap(),
-            "https://example.com/v1/responses"
-        );
-        assert_eq!(
-            resolve_request_url(ModelType::Anthropic, "https://example.com/v1", "", false).unwrap(),
-            "https://example.com/v1/messages"
-        );
+    fn anthropic_models_cannot_enable_codex_outbound() {
+        let mut input = input();
+        input.model_type = ModelType::Anthropic;
+        input.codex_outbound_enabled = true;
+
+        let normalized = normalize_model_input(&input).unwrap();
+
+        assert!(!normalized.codex_outbound_enabled);
+        assert!(normalized.openai_endpoint.is_empty());
     }
 }

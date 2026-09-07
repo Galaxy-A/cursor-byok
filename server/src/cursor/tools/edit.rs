@@ -1,9 +1,10 @@
+//! Maintains edit-specific Tool state and projections.
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 
 use crate::{model::ToolCall, Error, Result};
 
-use crate::cursor::proto::agent::v1 as pb;
+use crate::cursor::protocol::proto::agent::v1 as pb;
 
 #[derive(Clone, Debug)]
 pub(crate) struct EditWrite {
@@ -182,6 +183,9 @@ fn edit_notebook(call: &ToolCall, before: &str) -> std::result::Result<String, S
             .unwrap_or_default();
         let old =
             normalize_newlines(&string(call, "old_string").map_err(|error| error.to_string())?);
+        if old.is_empty() {
+            return Err("old_string must not be empty".into());
+        }
         let occurrences = source.match_indices(&old).count();
         let edited = match occurrences {
             0 => return Err("old_string was not found in the notebook cell".into()),
@@ -245,90 +249,45 @@ fn normalized(value: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::*;
+    use super::edit_notebook;
+    use crate::model::ToolCall;
 
-    fn call(name: &str, arguments: Value) -> ToolCall {
+    fn notebook_call(old_string: &str) -> ToolCall {
         ToolCall {
             index: 0,
-            call_id: "call\nfc_1".into(),
+            call_id: "call".into(),
             model_call_id: "model".into(),
-            name: name.into(),
+            name: "EditNotebook".into(),
             arguments_text: String::new(),
-            arguments,
+            arguments: json!({
+                "target_notebook": "/notebook.ipynb",
+                "cell_idx": 0,
+                "old_string": old_string,
+                "new_string": "replacement",
+            }),
+            argument_error: None,
         }
     }
 
-    fn read(content: &str) -> pb::ReadResult {
-        pb::ReadResult {
-            result: Some(pb::read_result::Result::Success(pb::ReadSuccess {
-                output: Some(pb::read_success::Output::Content(content.into())),
-                ..Default::default()
-            })),
-        }
+    fn single_cell_notebook() -> String {
+        json!({
+            "cells": [{"cell_type": "code", "source": ["print('hi')\n"]}],
+        })
+        .to_string()
     }
 
     #[test]
-    fn write_and_str_replace_use_one_lf_canonical_form() {
-        let write = after_read(
-            &call("Write", json!({"path":"/a","contents":"new\rline\r\n"})),
-            &read("old\r\nline\r"),
-        )
-        .unwrap();
-        assert_eq!(write.before, "old\nline\n");
-        assert_eq!(write.after, "new\nline\n");
-
-        let replacement = after_read(
-            &call(
-                "StrReplace",
-                json!({"path":"/a","old_string":"old\nline","new_string":"new\r\nline"}),
-            ),
-            &read("old\r\nline\r\nrest"),
-        )
-        .unwrap();
-        assert_eq!(replacement.after, "new\nline\nrest");
+    fn edit_notebook_rejects_empty_old_string() {
+        // StrReplace rejects an empty old_string; EditNotebook must do the same
+        // instead of prepending new_string (empty cell) or reporting a
+        // misleading "not unique" error (non-empty cell).
+        let error = edit_notebook(&notebook_call(""), &single_cell_notebook()).unwrap_err();
+        assert_eq!(error, "old_string must not be empty");
     }
 
     #[test]
-    fn str_replace_requires_one_match_unless_replace_all_is_explicit() {
-        let ambiguous = after_read(
-            &call(
-                "StrReplace",
-                json!({"path":"/a","old_string":"same","new_string":"new"}),
-            ),
-            &read("same\nsame\n"),
-        )
-        .unwrap_err();
-        assert_eq!(ambiguous, "old_string is not unique; found 2 occurrences");
-
-        let all = after_read(
-            &call(
-                "StrReplace",
-                json!({
-                    "path":"/a", "old_string":"same", "new_string":"new",
-                    "replace_all":true
-                }),
-            ),
-            &read("same\rsame\r\n"),
-        )
-        .unwrap();
-        assert_eq!(all.after, "new\nnew\n");
-    }
-
-    #[test]
-    fn notebook_edit_targets_one_cell_and_preserves_lf() {
-        let notebook = r#"{"cells":[{"cell_type":"code","source":["old\r\n","line"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
-        let edit = after_read(
-            &call(
-                "EditNotebook",
-                json!({
-                    "target_notebook":"/a.ipynb", "cell_idx":0, "is_new_cell":false,
-                    "cell_language":"python", "old_string":"old\nline", "new_string":"new\r\nline"
-                }),
-            ),
-            &read(notebook),
-        )
-        .unwrap();
-        let parsed: Value = serde_json::from_str(&edit.after).unwrap();
-        assert_eq!(parsed["cells"][0]["source"], json!(["new\n", "line"]));
+    fn edit_notebook_replaces_a_unique_old_string() {
+        let edited = edit_notebook(&notebook_call("hi"), &single_cell_notebook()).unwrap();
+        assert!(edited.contains("print('replacement')"));
     }
 }

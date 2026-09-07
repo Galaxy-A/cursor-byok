@@ -1,3 +1,4 @@
+//! Projects canonical Messages into provider-visible model input.
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -5,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::{Error, Result};
 
 use super::{
-    CanonicalMessage, ContentPart, MessageContent, ProviderReplayState, Role, ToolCallContent,
-    ToolResultContent,
+    normalize_tool_name, CanonicalMessage, ContentPart, MessageContent, ProviderReplayState, Role,
+    ToolCallContent, ToolResultContent,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -90,7 +91,7 @@ fn project_tool_round(
                 "tool round repeats provider replay state".into(),
             ));
         }
-        calls.extend(part_calls.iter().cloned());
+        calls.extend(part_calls.iter().map(normalized_tool_call));
         cursor += 1;
 
         while cursor < messages.len() {
@@ -138,7 +139,7 @@ fn project_tool_round(
             .map(|(message_id, result)| ProjectedMessage {
                 message_id,
                 role: Role::Tool,
-                content: ProjectedContent::ToolResult(result),
+                content: ProjectedContent::ToolResult(normalized_tool_result(&result)),
             }),
     );
     Ok(Some((output, cursor)))
@@ -157,13 +158,62 @@ fn project_message(message: &CanonicalMessage) -> ProjectedMessage {
             text: text.clone(),
             thinking: thinking.clone(),
             replay_state: replay_state.clone(),
-            calls: tool_calls.clone(),
+            calls: tool_calls.iter().map(normalized_tool_call).collect(),
         },
-        MessageContent::ToolResult(result) => ProjectedContent::ToolResult(result.clone()),
+        MessageContent::ToolResult(result) => {
+            ProjectedContent::ToolResult(normalized_tool_result(result))
+        }
     };
     ProjectedMessage {
         message_id: message.message_id.clone(),
         role: message.role.clone(),
         content,
+    }
+}
+
+fn normalized_tool_call(call: &ToolCallContent) -> ToolCallContent {
+    let mut call = call.clone();
+    call.name = normalize_tool_name(&call.name);
+    call
+}
+
+fn normalized_tool_result(result: &ToolResultContent) -> ToolResultContent {
+    let mut result = result.clone();
+    result.name = normalize_tool_name(&result.name);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Origin;
+    use serde_json::json;
+
+    #[test]
+    fn tool_names_are_normalized_before_provider_dispatch() {
+        let messages = [CanonicalMessage {
+            message_id: "assistant-1".into(),
+            role: Role::Assistant,
+            origin: Origin::Assistant,
+            content: MessageContent::Assistant {
+                text: String::new(),
+                thinking: String::new(),
+                tool_round_id: None,
+                replay_state: None,
+                tool_calls: vec![ToolCallContent {
+                    index: 0,
+                    call_id: "call-1".into(),
+                    name: "multi_tool_use.parallel".into(),
+                    arguments: json!({}),
+                }],
+            },
+            runtime_event_id: None,
+        }];
+
+        let projected = project_messages(&messages).unwrap();
+        let ProjectedContent::Assistant { calls, .. } = &projected[0].content else {
+            panic!("expected assistant projection");
+        };
+        assert_eq!(calls[0].name, "multi_tool_use_parallel");
     }
 }

@@ -1,3 +1,4 @@
+//! Verifies Conversation recovery and resumable checkpoint state.
 #[path = "support/fake_provider.rs"]
 mod fake_provider;
 #[path = "support/fixtures.rs"]
@@ -7,16 +8,177 @@ use std::{collections::HashSet, sync::Arc};
 
 use cursor_server::{
     cursor::{
-        connect,
         prompting::{PromptAssets, PromptCompiler},
-        proto::agent::v1 as pb,
-        CursorCommand, CursorSessionRegistry,
+        protocol::{connect, proto::agent::v1 as pb},
+        TransportCommand, TransportRegistry,
     },
     model::ToolRoundId,
     provider::{FinishReason, ModelEvent},
     store::{BlobEdge, BlobId},
 };
 use prost::Message;
+
+#[tokio::test]
+async fn v0_1_5_beta_1_schema_upgrades_to_checkpoints_without_losing_rows() {
+    use std::borrow::Cow;
+
+    use sqlx::{
+        migrate::Migrator,
+        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    };
+
+    static ALL_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("upgrade.db");
+    let database_url = format!("sqlite://{}", database_path.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    // v0.1.5-beta.1 shipped migrations 0001 through 0004.
+    let v0_1_5_beta_1 = Migrator {
+        migrations: Cow::Owned(ALL_MIGRATIONS.iter().take(4).cloned().collect()),
+        ..Migrator::DEFAULT
+    };
+    v0_1_5_beta_1.run(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO conversations(conversation_id, updated_at_ms)
+         VALUES ('upgrade-conversation', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO conversation_revisions(
+            conversation_id, parent_revision_id, state_digest, created_at_ms
+         ) VALUES ('upgrade-conversation', NULL, zeroblob(32), 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let revision_id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE conversations SET current_revision_id = ? WHERE conversation_id = 'upgrade-conversation'",
+    )
+    .bind(revision_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO messages(
+            conversation_id, message_id, role, origin, payload_json, created_at_ms
+         ) VALUES ('upgrade-conversation', 'message-1', 'user', 'user', '{}', 3)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO revision_messages(revision_id, ordinal, conversation_id, message_id)
+         VALUES (?, 0, 'upgrade-conversation', 'message-1')",
+    )
+    .bind(revision_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO runs(
+            run_id, conversation_id, base_revision_id, head_revision_id, run_kind, status,
+            created_at_ms, updated_at_ms
+         ) VALUES ('upgrade-run', 'upgrade-conversation', ?, ?, 'root', 'completed', 4, 4)",
+    )
+    .bind(revision_id)
+    .bind(revision_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tool_rounds(
+            round_id, run_id, base_revision_id, assistant_json, status, created_at_ms, updated_at_ms
+         ) VALUES ('upgrade-round', 'upgrade-run', ?, '{}', 'settled', 5, 5)",
+    )
+    .bind(revision_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tool_round_calls(
+            round_id, call_index, call_id, model_call_id, name, arguments_json, status,
+            committed_revision_id
+         ) VALUES ('upgrade-round', 0, 'upgrade-call', 'model-call', 'Read', '{}', 'completed', ?)",
+    )
+    .bind(revision_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO input_anchors(conversation_id, input_id, base_revision_id, created_at_ms)
+         VALUES ('upgrade-conversation', 'input-1', ?, 6)",
+    )
+    .bind(revision_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let upgraded = cursor_server::store::Store::connect(&database_url)
+        .await
+        .unwrap();
+    let current: i64 = sqlx::query_scalar(
+        "SELECT current_checkpoint_id FROM conversations
+         WHERE conversation_id = 'upgrade-conversation'",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+    let linked_messages: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM checkpoint_messages WHERE checkpoint_id = ?")
+            .bind(revision_id)
+            .fetch_one(upgraded.pool())
+            .await
+            .unwrap();
+    let run_checkpoints: (i64, i64) = sqlx::query_as(
+        "SELECT base_checkpoint_id, head_checkpoint_id FROM runs WHERE run_id = 'upgrade-run'",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+    let round_checkpoint: i64 = sqlx::query_scalar(
+        "SELECT base_checkpoint_id FROM tool_rounds WHERE round_id = 'upgrade-round'",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+    let committed_checkpoint: i64 = sqlx::query_scalar(
+        "SELECT committed_checkpoint_id FROM tool_round_calls WHERE call_id = 'upgrade-call'",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+    let anchor_checkpoint: i64 = sqlx::query_scalar(
+        "SELECT base_checkpoint_id FROM input_anchors WHERE input_id = 'input-1'",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+
+    assert_eq!(current, revision_id);
+    assert_eq!(linked_messages, 1);
+    assert_eq!(run_checkpoints, (revision_id, revision_id));
+    assert_eq!(round_checkpoint, revision_id);
+    assert_eq!(committed_checkpoint, revision_id);
+    assert_eq!(anchor_checkpoint, revision_id);
+}
 
 #[tokio::test]
 async fn checkpoint_dependencies_are_content_addressed_without_a_persistent_stream_outbox() {
@@ -85,17 +247,16 @@ async fn eligible_pending_checkpoint_resumes_tools_before_the_next_model_call() 
             .as_path(),
     )
     .unwrap();
-    let registry = CursorSessionRegistry::new(
+    let registry = TransportRegistry::new(
         store.clone(),
         Arc::new(provider.clone()),
         PromptCompiler::new(assets),
-        Default::default(),
     );
 
     let first = registry.get_or_create("first-run").await.unwrap();
     let mut first_output = first.subscribe();
     first
-        .command(CursorCommand::Append {
+        .command(TransportCommand::Append {
             seqno: 0,
             message: Box::new(start_request()),
         })
@@ -134,14 +295,14 @@ async fn eligible_pending_checkpoint_resumes_tools_before_the_next_model_call() 
             .as_u64()
             .unwrap();
     assert_eq!(provider.requests().len(), 1);
-    first.cancel();
+    first.disconnect().await;
 
     let resumed = registry.get_or_create("resumed-run").await.unwrap();
     let mut resumed_output = resumed.subscribe();
     let mut resumed_checkpoints = Vec::new();
     let mut resumed_set_blob_ids = HashSet::new();
     resumed
-        .command(CursorCommand::Append {
+        .command(TransportCommand::Append {
             seqno: 0,
             message: Box::new(resume_request(staged.clone())),
         })
@@ -184,7 +345,7 @@ async fn eligible_pending_checkpoint_resumes_tools_before_the_next_model_call() 
         .unwrap();
     assert_eq!(resumed_round.created_at_ms, staged_started_at_ms);
     resumed
-        .command(CursorCommand::Append {
+        .command(TransportCommand::Append {
             seqno: resumed_seqno,
             message: Box::new(read_result(exec_id)),
         })
@@ -313,17 +474,16 @@ async fn recovery_rejects_a_kv_get_payload_whose_hash_does_not_match_the_blob_id
             .as_path(),
     )
     .unwrap();
-    let registry = CursorSessionRegistry::new(
+    let registry = TransportRegistry::new(
         store,
         Arc::new(fake_provider::FakeProvider::default()),
         PromptCompiler::new(assets),
-        Default::default(),
     );
     let handle = registry.get_or_create("bad-blob-run").await.unwrap();
     let mut output = handle.subscribe();
     let expected = BlobId::digest(b"expected");
     handle
-        .command(CursorCommand::Append {
+        .command(TransportCommand::Append {
             seqno: 0,
             message: Box::new(resume_request(pb::ConversationStateStructure {
                 root_prompt_messages_json: vec![expected.as_bytes().to_vec()],
@@ -346,7 +506,7 @@ async fn recovery_rejects_a_kv_get_payload_whose_hash_does_not_match_the_blob_id
         }
     };
     handle
-        .command(CursorCommand::Append {
+        .command(TransportCommand::Append {
             seqno: 1,
             message: Box::new(pb::AgentClientMessage {
                 message: Some(pb::agent_client_message::Message::KvClientMessage(
@@ -472,13 +632,9 @@ async fn next_message(
     pb::AgentServerMessage::decode(payload).unwrap()
 }
 
-async fn acknowledge(
-    handle: &cursor_server::cursor::CursorSessionHandle,
-    seqno: &mut i64,
-    id: u32,
-) {
+async fn acknowledge(handle: &cursor_server::cursor::TransportHandle, seqno: &mut i64, id: u32) {
     handle
-        .command(CursorCommand::Append {
+        .command(TransportCommand::Append {
             seqno: *seqno,
             message: Box::new(pb::AgentClientMessage {
                 message: Some(pb::agent_client_message::Message::KvClientMessage(

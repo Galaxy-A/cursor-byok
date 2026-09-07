@@ -1,7 +1,8 @@
+//! Creates, loads, and updates Conversations.
 use sqlx::{Row, Sqlite, Transaction};
 
 use crate::{
-    model::{Conversation, ConversationId, RevisionId, RunId},
+    model::{CheckpointId, Conversation, ConversationId, RunId},
     Error, Result,
 };
 
@@ -13,7 +14,7 @@ impl Store {
         conversation_id: &ConversationId,
     ) -> Result<Option<Conversation>> {
         let row = sqlx::query(
-            "SELECT current_revision_id, active_run_id
+            "SELECT current_checkpoint_id, active_run_id
              FROM conversations WHERE conversation_id = ?",
         )
         .bind(conversation_id.as_str())
@@ -21,7 +22,7 @@ impl Store {
         .await?;
         Ok(row.map(|row| Conversation {
             conversation_id: conversation_id.clone(),
-            current_revision_id: RevisionId(row.get(0)),
+            current_checkpoint_id: CheckpointId(row.get(0)),
             active_run_id: row.get::<Option<String>, _>(1).map(RunId),
         }))
     }
@@ -29,7 +30,7 @@ impl Store {
     pub(crate) async fn ensure_conversation_tx(
         tx: &mut Transaction<'_, Sqlite>,
         conversation_id: &ConversationId,
-    ) -> Result<RevisionId> {
+    ) -> Result<CheckpointId> {
         sqlx::query(
             "INSERT OR IGNORE INTO conversations(conversation_id, updated_at_ms) VALUES (?, ?)",
         )
@@ -39,19 +40,19 @@ impl Store {
         .await?;
 
         let current: Option<i64> = sqlx::query_scalar(
-            "SELECT current_revision_id FROM conversations WHERE conversation_id = ?",
+            "SELECT current_checkpoint_id FROM conversations WHERE conversation_id = ?",
         )
         .bind(conversation_id.as_str())
         .fetch_one(&mut **tx)
         .await?;
         if let Some(current) = current {
-            return Ok(RevisionId(current));
+            return Ok(CheckpointId(current));
         }
 
-        let digest = super::revisions::message_digest(&[])?;
+        let digest = super::checkpoints::message_digest(&[])?;
         let root = sqlx::query(
-            "INSERT INTO conversation_revisions
-             (conversation_id, parent_revision_id, state_digest, created_at_ms)
+            "INSERT INTO conversation_checkpoints
+             (conversation_id, parent_checkpoint_id, state_digest, created_at_ms)
              VALUES (?, NULL, ?, ?)",
         )
         .bind(conversation_id.as_str())
@@ -61,25 +62,25 @@ impl Store {
         .await?
         .last_insert_rowid();
         sqlx::query(
-            "UPDATE conversations SET current_revision_id = ?, updated_at_ms = ?
-             WHERE conversation_id = ? AND current_revision_id IS NULL",
+            "UPDATE conversations SET current_checkpoint_id = ?, updated_at_ms = ?
+             WHERE conversation_id = ? AND current_checkpoint_id IS NULL",
         )
         .bind(root)
         .bind(now_ms())
         .bind(conversation_id.as_str())
         .execute(&mut **tx)
         .await?;
-        Ok(RevisionId(root))
+        Ok(CheckpointId(root))
     }
 
     pub(crate) async fn require_active_head_tx(
         tx: &mut Transaction<'_, Sqlite>,
         conversation_id: &ConversationId,
         run_id: &RunId,
-        expected: RevisionId,
+        expected: CheckpointId,
     ) -> Result<()> {
         let row = sqlx::query(
-            "SELECT current_revision_id, active_run_id FROM conversations WHERE conversation_id = ?",
+            "SELECT current_checkpoint_id, active_run_id FROM conversations WHERE conversation_id = ?",
         )
         .bind(conversation_id.as_str())
         .fetch_optional(&mut **tx)
@@ -92,7 +93,7 @@ impl Store {
                 Ok(())
             }
             _ => Err(Error::Store(format!(
-                "run {run_id} no longer owns conversation {conversation_id} at revision {expected}"
+                "run {run_id} no longer owns conversation {conversation_id} at checkpoint {expected}"
             ))),
         }
     }

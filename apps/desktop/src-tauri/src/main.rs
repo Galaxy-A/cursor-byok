@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-fn main() {
-    cursor_byok_desktop::run();
+fn main() -> std::process::ExitCode {
+    cursor_byok_desktop::run()
 }

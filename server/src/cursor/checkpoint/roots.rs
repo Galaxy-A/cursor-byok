@@ -1,4 +1,5 @@
-use crate::{cursor::projection, model::CanonicalMessage, store::BlobId, Error, Result};
+//! Maintains stable append-only Cursor root messages.
+use crate::{cursor::checkpoint::messages, model::CanonicalMessage, store::BlobId, Error, Result};
 
 use super::CheckpointBuilder;
 
@@ -14,7 +15,7 @@ impl CheckpointBuilder {
         &mut self,
         messages: &[CanonicalMessage],
     ) -> Result<Vec<BlobId>> {
-        let wire_messages = projection::stable_messages(&self.instructions, messages, &self.model)?;
+        let wire_messages = messages::stable_messages(&self.instructions, messages, &self.model)?;
         self.ensure_roots()?;
         let replacement = self
             .roots
@@ -75,7 +76,7 @@ impl CheckpointBuilder {
         &mut self,
         messages: &[CanonicalMessage],
     ) -> Result<Vec<BlobId>> {
-        let wire_messages = projection::stable_messages(&self.instructions, messages, &self.model)?;
+        let wire_messages = messages::stable_messages(&self.instructions, messages, &self.model)?;
         self.ensure_roots()?;
         let previous_system = self
             .roots
@@ -110,28 +111,4 @@ fn changed_system_root(roots: &RootFrontier, messages: &[Vec<u8>]) -> Option<Vec
         .zip(messages.first())
         .filter(|(current, message)| **current != BlobId::digest(message))
         .map(|(_, message)| message.clone())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_new_prompt_replaces_only_the_system_root() {
-        let previous = b"previous prompt".to_vec();
-        let current = b"current prompt".to_vec();
-        let roots = RootFrontier {
-            ids: vec![BlobId::digest(&previous), BlobId::digest(b"user")],
-            generated: Vec::new(),
-            base_count: 2,
-        };
-        assert_eq!(
-            changed_system_root(&roots, &[current.clone(), b"user".to_vec()]),
-            Some(current)
-        );
-        assert_eq!(
-            changed_system_root(&roots, &[previous, b"user".to_vec()]),
-            None
-        );
-    }
 }

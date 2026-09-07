@@ -1,3 +1,4 @@
+//! Implements the Anthropic provider adapter.
 use async_stream::try_stream;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use eventsource_stream::Eventsource;
@@ -11,8 +12,10 @@ use crate::{
 };
 
 use super::{
-    merge_extra_params, recorder::recorded_headers, CallRecorder, FinishReason, ModelEvent,
-    Provider, ProviderStream,
+    attempt::{send_once, Attempt},
+    map_sse_error, merge_extra_params, provider_event_error,
+    recorder::recorded_headers,
+    CallRecorder, FinishReason, ModelEvent, Provider, ProviderStream,
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 65_000;
@@ -49,40 +52,54 @@ impl Provider for AnthropicProvider {
         let recorder = self.recorder.clone();
         Box::pin(try_stream! {
             let ModelInvocation { call_id, request, .. } = invocation;
-            let messages = anthropic_messages(&request.history)?;
+            let mut messages = anthropic_messages(&request.history)?;
+            mark_cache_breakpoint(&mut messages);
+            let system = if request.prompt.instructions.is_empty() {
+                Value::String(String::new())
+            } else {
+                json!([{
+                    "type": "text",
+                    "text": request.prompt.instructions,
+                    "cache_control": {"type": "ephemeral"}
+                }])
+            };
             let max_tokens = request.model.max_output_tokens.or(config.max_output_tokens)
                 .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
             let mut body = json!({
-                "model": request.model.model_id, "system": request.prompt.instructions, "messages": messages,
-                "max_tokens": max_tokens, "stream": true,
-                "tools": request.prompt.tools.iter().map(|tool| json!({
-                    "name": tool.name, "description": tool.description, "input_schema": tool.parameters
-                })).collect::<Vec<_>>()
+                "model": request.model.model_id, "system": system, "messages": messages,
+                "max_tokens": max_tokens, "stream": true
             });
+            if !request.prompt.tools.is_empty() {
+                let tool_count = request.prompt.tools.len();
+                body["tools"] = json!(request.prompt.tools.iter().enumerate().map(|(index, tool)| {
+                    let mut value = json!({
+                        "name": tool.name, "description": tool.description, "input_schema": tool.parameters
+                    });
+                    if index + 1 == tool_count {
+                        value["cache_control"] = json!({"type": "ephemeral"});
+                    }
+                    value
+                }).collect::<Vec<_>>());
+            }
             apply_model(&mut body, &request.model)?;
             merge_extra_params(&mut body, &request.model.extra_params)?;
+            let request_headers = recorded_headers(
+                &config,
+                &[("content-type", "application/json"), ("anthropic-version", "2023-06-01")],
+            );
             if let Some(recorder) = &recorder {
-                recorder.request(recorded_headers(&config, &[("content-type", "application/json"), ("anthropic-version", "2023-06-01")]), &body).await?;
+                recorder.request(request_headers.clone(), &body).await?;
             }
-            let request = client.post(&config.request_url)
-                .header("x-api-key", &config.api_key).header("anthropic-version", "2023-06-01")
-                .headers(config.custom_headers.clone())
-                .json(&body).send();
-            let response = tokio::select! {
-                _ = cancellation.cancelled() => return,
-                response = request => response,
-            };
-            let response = response?;
-            if let Some(recorder) = &recorder {
-                recorder.response_headers(response.status().as_u16()).await?;
-            }
-            if !response.status().is_success() {
-                let status = response.status(); let bytes = response.bytes().await?;
-                if let Some(recorder) = &recorder { recorder.response_chunk(&bytes).await?; }
-                let text = String::from_utf8_lossy(&bytes);
-                Err(Error::Provider(format!("Anthropic {status}: {text}")))?;
-                return;
-            }
+            let attempt = send_once(
+                "Anthropic",
+                || client.post(&config.request_url)
+                    .header("x-api-key", &config.api_key).header("anthropic-version", "2023-06-01")
+                    .headers(config.custom_headers.clone())
+                    .json(&body),
+                &cancellation,
+                recorder.as_ref(),
+            ).await?;
+            let Attempt::Response(response) = attempt else { return };
             yield ModelEvent::Start { model_call_id: call_id };
             let chunk_recorder = recorder.clone();
             let chunks = response.bytes_stream()
@@ -109,8 +126,11 @@ impl Provider for AnthropicProvider {
                 _ = cancellation.cancelled() => { return; }
                 event = source.next() => event,
             } {
-                let event = event.map_err(|error| Error::Provider(format!("Anthropic SSE: {error}")))?;
+                let event = event.map_err(|error| map_sse_error("Anthropic", error))?;
                 let value: Value = serde_json::from_str(&event.data)?;
+                if let Some(error) = provider_event_error("Anthropic", &value) {
+                    Err(error)?;
+                }
                 let data_kind = value.get("type").and_then(Value::as_str);
                 let kind = match event.event.as_str() {
                     "" | "message" => data_kind.unwrap_or(event.event.as_str()),
@@ -222,7 +242,6 @@ impl Provider for AnthropicProvider {
                         };
                         yield ModelEvent::Done(finish);
                     }
-                    "error" => Err(Error::Provider(format!("Anthropic stream error: {}", event.data)))?,
                     _ => {}
                 }
             }
@@ -299,10 +318,19 @@ fn apply_model(body: &mut Value, model: &crate::model::ModelSpec) -> Result<()> 
 
 fn merge_usage(total: &mut Usage, update: Usage) {
     merge_usage_field(&mut total.input_tokens, update.input_tokens);
+    merge_usage_field(&mut total.context_input_tokens, update.context_input_tokens);
     merge_usage_field(&mut total.output_tokens, update.output_tokens);
+    merge_usage_field(&mut total.total_tokens, update.total_tokens);
     merge_usage_field(&mut total.cache_read_tokens, update.cache_read_tokens);
     merge_usage_field(&mut total.cache_write_tokens, update.cache_write_tokens);
     merge_usage_field(&mut total.reasoning_tokens, update.reasoning_tokens);
+    if let Some(request_tokens) = total
+        .context_input_tokens
+        .zip(total.output_tokens)
+        .and_then(|(input, output)| input.checked_add(output))
+    {
+        total.total_tokens = Some(request_tokens);
+    }
 }
 
 fn merge_usage_field(total: &mut Option<u64>, update: Option<u64>) {
@@ -372,6 +400,29 @@ fn anthropic_messages(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
     Ok(output)
 }
 
+fn mark_cache_breakpoint(messages: &mut [Value]) {
+    let Some(message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+    else {
+        return;
+    };
+    let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for block in content.iter_mut().rev() {
+        let kind = block.get("type").and_then(Value::as_str);
+        if !matches!(kind, Some("text" | "image" | "tool_result")) {
+            continue;
+        }
+        if let Some(block) = block.as_object_mut() {
+            block.insert("cache_control".into(), json!({"type": "ephemeral"}));
+            return;
+        }
+    }
+}
+
 fn anthropic_parts(role: &Role, parts: &[ContentPart]) -> Result<Vec<Value>> {
     parts
         .iter()
@@ -430,14 +481,67 @@ fn required_u64(value: &Value, name: &str) -> Result<u64> {
 }
 
 fn anthropic_usage(value: &Value) -> Usage {
+    let input_tokens = value.get("input_tokens").and_then(Value::as_u64);
+    let cache_read_tokens = value.get("cache_read_input_tokens").and_then(Value::as_u64);
+    let cache_write_tokens = value
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
+    let context_input_tokens = input_tokens.map(|input| {
+        input
+            .saturating_add(cache_read_tokens.unwrap_or_default())
+            .saturating_add(cache_write_tokens.unwrap_or_default())
+    });
     Usage {
-        input_tokens: value.get("input_tokens").and_then(Value::as_u64),
+        input_tokens,
+        context_input_tokens,
         output_tokens: value.get("output_tokens").and_then(Value::as_u64),
         total_tokens: value.get("total_tokens").and_then(Value::as_u64),
-        cache_read_tokens: value.get("cache_read_input_tokens").and_then(Value::as_u64),
-        cache_write_tokens: value
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64),
+        cache_read_tokens,
+        cache_write_tokens,
         reasoning_tokens: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_tokens_are_included_once_in_anthropic_context_input() {
+        let usage = anthropic_usage(&serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 20,
+            "cache_creation_input_tokens": 30
+        }));
+
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.context_input_tokens, Some(60));
+        assert_eq!(usage.output_tokens, Some(5));
+    }
+
+    #[test]
+    fn streamed_anthropic_usage_includes_cached_input_in_total() {
+        let mut usage = Usage::default();
+        merge_usage(
+            &mut usage,
+            anthropic_usage(&serde_json::json!({
+                "input_tokens": 414,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 100_352,
+                "cache_creation_input_tokens": 0
+            })),
+        );
+        merge_usage(
+            &mut usage,
+            anthropic_usage(&serde_json::json!({"output_tokens": 191})),
+        );
+
+        assert_eq!(usage.input_tokens, Some(414));
+        assert_eq!(usage.cache_read_tokens, Some(100_352));
+        assert_eq!(usage.cache_write_tokens, Some(0));
+        assert_eq!(usage.context_input_tokens, Some(100_766));
+        assert_eq!(usage.output_tokens, Some(191));
+        assert_eq!(usage.total_tokens, Some(100_957));
     }
 }

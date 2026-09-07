@@ -158,14 +158,27 @@ jobs:
           mkdir -p legacy-update
           tar -czf "legacy-update/cursor-byok-${VERSION}-linux-amd64.tar.gz" -C target/release cursor-byok-desktop
 
-      - name: Package legacy Windows updater asset
+      - name: Package and sign legacy Windows updater asset
         if: matrix.platform == 'windows-x86_64'
         shell: pwsh
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           New-Item -ItemType Directory -Force legacy-update | Out-Null
-          Compress-Archive -LiteralPath target/release/cursor-byok-desktop.exe -DestinationPath "legacy-update/cursor-byok-$env:VERSION-windows-amd64.zip"
+          $asset = "legacy-update/cursor-byok-$env:VERSION-windows-amd64.zip"
+          Compress-Archive -LiteralPath target/release/cursor-byok-desktop.exe -DestinationPath $asset
+          Push-Location apps/desktop
+          npm exec tauri signer sign -- "../../$asset"
+          Pop-Location
+          $entries = @(tar -tf $asset)
+          if ($entries.Count -ne 1 -or [System.IO.Path]::GetFileName($entries[0]) -ne 'cursor-byok-desktop.exe') {
+            throw "Windows updater archive must contain only cursor-byok-desktop.exe"
+          }
+          if (!(Test-Path "$asset.sig")) {
+            throw "Windows updater archive signature was not generated"
+          }
 
       - name: Package legacy macOS updater asset
         if: contains(matrix.platform, 'macos')
@@ -206,12 +219,26 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          node scripts/release/generate-legacy-update.mjs \
+          node .github/scripts/generate-legacy-update.mjs \
             --version "${VERSION}" \
             --repository "${GITHUB_REPOSITORY}" \
             --assets-dir legacy-update \
             --output legacy-update/update.json \
             --notes "Cursor BYOK v${VERSION}"
+
+      - name: Generate signed Windows portable update manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          asset="cursor-byok-${VERSION}-windows-amd64.zip"
+          test -f "legacy-update/${asset}"
+          test -f "legacy-update/${asset}.sig"
+          node .github/scripts/generate-portable-update.mjs \
+            --version "${VERSION}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --asset "${asset}" \
+            --signature "legacy-update/${asset}.sig" \
+            --output legacy-update/portable-latest.json
 
       - name: Normalize Tauri updater download URLs
         env:
@@ -231,7 +258,7 @@ jobs:
             -H "Accept: application/octet-stream" \
             "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
             > tauri-update/latest.json
-          node scripts/release/normalize-tauri-update.mjs \
+          node .github/scripts/normalize-tauri-update.mjs \
             --manifest tauri-update/latest.json \
             --release tauri-update/release.json \
             --repository "${GITHUB_REPOSITORY}" \

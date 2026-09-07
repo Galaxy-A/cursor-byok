@@ -1,3 +1,4 @@
+//! Enforces Conversation ownership during concurrent writes.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};

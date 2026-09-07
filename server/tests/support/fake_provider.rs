@@ -1,3 +1,4 @@
+//! Provides deterministic provider streams for integration tests.
 #![allow(dead_code)]
 
 use std::{
@@ -30,10 +31,13 @@ pub struct FakeProvider {
 
 impl FakeProvider {
     pub fn push(&self, events: Vec<ModelEvent>) {
+        self.push_results(events.into_iter().map(Ok).collect());
+    }
+    pub fn push_results(&self, events: Vec<Result<ModelEvent, Error>>) {
         self.responses
             .lock()
             .unwrap()
-            .push_back(FakeResponse::Events(events.into_iter().map(Ok).collect()));
+            .push_back(FakeResponse::Events(events));
     }
     pub fn push_error(&self, error: Error) {
         self.responses

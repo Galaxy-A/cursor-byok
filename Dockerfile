@@ -20,7 +20,7 @@ COPY apps/desktop/src-tauri/src/ apps/desktop/src-tauri/src/
 COPY apps/desktop/src-tauri/capabilities/ apps/desktop/src-tauri/capabilities/
 COPY apps/desktop/src-tauri/icons/ apps/desktop/src-tauri/icons/
 COPY apps/desktop/src-tauri/tauri.conf.json apps/desktop/src-tauri/tauri.conf.json
-COPY scripts/cursor-proto/proto/ scripts/cursor-proto/proto/
+COPY protocols/cursor/ protocols/cursor/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \

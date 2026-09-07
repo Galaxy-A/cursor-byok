@@ -1,5 +1,5 @@
 use std::{
-    process::Command,
+    process::{Command, ExitCode},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -19,7 +19,6 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(dev)]
 use cursor_server::config::ConsoleSource;
@@ -27,6 +26,7 @@ use cursor_server::{App, Config, Result};
 
 #[cfg(not(dev))]
 use crate::frontend;
+use crate::startup::{self, StartupDiagnostics};
 use crate::tray;
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
@@ -141,19 +141,47 @@ fn create_main_window(
     builder.build()
 }
 
-pub fn run() {
+pub fn run() -> ExitCode {
+    let diagnostics = match StartupDiagnostics::initialize() {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => {
+            startup::report_logging_failure(error.as_ref());
+            return ExitCode::FAILURE;
+        }
+    };
+    #[cfg(unix)]
+    {
+        let open_file_limit = match crate::resource_limits::raise_open_file_limit() {
+            Ok(limit) => limit,
+            Err(error) => {
+                diagnostics.report_fatal(&error);
+                return ExitCode::FAILURE;
+            }
+        };
+        tracing::info!(
+            requested = crate::resource_limits::REQUESTED_OPEN_FILE_LIMIT,
+            previous = open_file_limit.previous,
+            effective = open_file_limit.effective,
+            hard = open_file_limit.hard,
+            "open file limit configured"
+        );
+    }
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        architecture = std::env::consts::ARCH,
+        log_directory = %diagnostics.log_directory().display(),
+        "desktop starting"
+    );
+
     let started_by_autostart = std::env::args_os().any(|arg| arg == AUTOSTART_ARG);
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "cursor_server=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let app = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![open_terminal_with_command])
+        .invoke_handler(tauri::generate_handler![
+            open_terminal_with_command,
+            crate::update::check_portable_update,
+            crate::update::install_portable_update,
+        ])
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if !args.iter().any(|arg| arg == AUTOSTART_ARG) {
                 tray::show_main_window(app);
@@ -168,7 +196,12 @@ pub fn run() {
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
                 Some(vec![AUTOSTART_ARG]),
             ))?;
-            let config = Config::desktop()?;
+            let config = {
+                let mut config = Config::desktop()?;
+                // 插件的 minAppVersion 按桌面应用版本判定,而不是内嵌 server 库的版本。
+                config.app_version = env!("CARGO_PKG_VERSION").into();
+                config
+            };
             #[cfg(dev)]
             let config = {
                 let mut config = config;
@@ -216,10 +249,17 @@ pub fn run() {
                 window.set_focus()?;
             }
             tray::create(app)?;
+            crate::update::signal_ready_if_requested()?;
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("failed to build Cursor BYOK desktop app");
+        .build(tauri::generate_context!());
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            diagnostics.report_fatal(&error);
+            return ExitCode::FAILURE;
+        }
+    };
 
     app.run(|app, event| match event {
         RunEvent::WindowEvent {
@@ -264,4 +304,6 @@ pub fn run() {
         } => tray::show_main_window(app),
         _ => {}
     });
+
+    ExitCode::SUCCESS
 }

@@ -1,20 +1,24 @@
 import { useEffect, useRef } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
-import { MessageProvider } from "./components/ui/MessageProvider";
-import { useMessage } from "./components/ui/message";
-import { AppFrame } from "./layouts/AppFrame";
-import { AppLayout } from "./layouts/AppLayout";
-import { CallsPage } from "./pages/CallsPage";
-import { CallDetailsPage } from "./pages/CallDetailsPage";
-import { CursorSettingsPage } from "./pages/CursorSettingsPage";
-import { HomePage } from "./pages/HomePage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { useAppStore } from "./store/appStore";
-import { updateStore } from "./store/updateStore";
+import { TooltipProvider } from "./shared/ui/Tooltip";
+import { MessageProvider } from "./shared/ui/MessageProvider";
+import { useMessage } from "./shared/ui/message";
+import { AppFrame } from "./shell/AppFrame";
+import { AppLayout } from "./shell/AppLayout";
+import { CallsPage } from "./features/calls/CallsPage";
+import { CallDetailsPage } from "./features/calls/CallDetailsPage";
+import { CursorSettingsPage } from "./features/models/CursorSettingsPage";
+import { HomePage } from "./features/home/HomePage";
+import { PluginManagementPage } from "./features/plugins/PluginManagementPage";
+import { SettingsPage } from "./features/settings/SettingsPage";
+import { useAppStore } from "./shared/store/appStore";
+import { updateStore } from "./shared/store/updateStore";
+
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 
 export function App() {
   return (
-    <>
+    <TooltipProvider>
       <HashRouter>
         <Routes>
           <Route path="calls/:callId" element={<CallDetailsPage />} />
@@ -23,6 +27,7 @@ export function App() {
               <Route index element={<HomePage />} />
               <Route path="calls" element={<CallsPage />} />
               <Route path="harness/cursor" element={<CursorSettingsPage />} />
+              <Route path="plugins" element={<PluginManagementPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -30,13 +35,14 @@ export function App() {
         </Routes>
       </HashRouter>
       <AppMessages />
-    </>
+    </TooltipProvider>
   );
 }
 
 function AppMessages() {
   const { error } = useAppStore();
   const previousError = useRef<string | null>(null);
+  const lastAutomaticUpdateCheckAt = useRef(0);
   const showMessage = useMessage();
 
   useEffect(() => {
@@ -45,12 +51,36 @@ function AppMessages() {
   }, [error, showMessage]);
 
   useEffect(() => {
-    void updateStore.check().then((version) => {
-      if (!version) return;
-      showMessage(t("发现新版本 {version}，可在设置中安装", { version }), { duration: 6_000 });
-    }).catch(() => {
-      // Startup checks are best-effort; manual checks in Settings report errors.
-    });
+    let disposed = false;
+    const checkAutomatically = () => {
+      const now = Date.now();
+      if (now - lastAutomaticUpdateCheckAt.current < AUTO_UPDATE_CHECK_INTERVAL_MS) return;
+      lastAutomaticUpdateCheckAt.current = now;
+      const previousVersion = updateStore.getSnapshot().availableVersion;
+      void updateStore.check().then((version) => {
+        if (disposed || !version || version === previousVersion) return;
+        showMessage(t("发现新版本 {version}，可在设置中安装", { version }), { duration: 6_000 });
+      }).catch(() => {
+        if (!disposed) lastAutomaticUpdateCheckAt.current = 0;
+        // Automatic checks are best-effort; manual checks in Settings report errors.
+      });
+    };
+    const checkWhenVisible = () => {
+      if (document.visibilityState === "visible") checkAutomatically();
+    };
+
+    checkAutomatically();
+    window.addEventListener("focus", checkAutomatically);
+    window.addEventListener("online", checkAutomatically);
+    document.addEventListener("visibilitychange", checkWhenVisible);
+    const timer = window.setInterval(checkAutomatically, AUTO_UPDATE_CHECK_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", checkAutomatically);
+      window.removeEventListener("online", checkAutomatically);
+      document.removeEventListener("visibilitychange", checkWhenVisible);
+      window.clearInterval(timer);
+    };
   }, [showMessage]);
 
   return <MessageProvider />;

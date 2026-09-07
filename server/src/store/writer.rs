@@ -1,3 +1,4 @@
+//! Serializes write transactions that mutate Conversation state.
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, MutexGuard};

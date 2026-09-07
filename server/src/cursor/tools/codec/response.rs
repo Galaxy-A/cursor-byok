@@ -1,18 +1,18 @@
+//! Decodes Tool execution responses received from Cursor.
 use crate::{
     cursor::{
-        interaction,
-        proto::agent::v1 as pb,
+        protocol::{events, proto::agent::v1 as pb},
         tools::{
-            edit,
-            result::{self, ToolCompletion},
+            compat, edit,
             runtime::{CursorToolRuntime, ExecStage, PendingExec},
+            tool_call_result::{self as result, ToolCompletion},
         },
     },
     model::ToolCall,
     Error, Result,
 };
 
-use super::request::{await_read_request, edit_write_request};
+use super::request::edit_write_request;
 
 pub enum ClientExecEvent {
     Delta(Box<pb::AgentServerMessage>),
@@ -25,19 +25,24 @@ pub async fn client_event(
     message: &pb::ExecClientMessage,
     pending: &CursorToolRuntime,
 ) -> Result<ClientExecEvent> {
+    if pending.is_interrupted(message.id).await {
+        if message.message.as_ref().is_some_and(is_terminal) {
+            pending.discard_exec(message.id).await;
+        }
+        return Ok(ClientExecEvent::Pending);
+    }
     let call = match pending.exec_call(message.id).await {
         Some(call) => call,
         None if pending.completed_call(message.id).await.is_some() => {
-            return Err(Error::Protocol(format!(
-                "duplicate terminal ExecClientMessage id: {}",
-                message.id
-            )))
+            tracing::warn!(id = message.id, "ignoring duplicate terminal tool response");
+            return Ok(ClientExecEvent::Pending);
         }
         None => {
-            return Err(Error::Protocol(format!(
-                "unknown ExecClientMessage id: {}",
-                message.id
-            )))
+            tracing::warn!(
+                id = message.id,
+                "ignoring response for unknown tool execution"
+            );
+            return Ok(ClientExecEvent::Pending);
         }
     };
     let Some(wire_result) = &message.message else {
@@ -47,7 +52,6 @@ pub async fn client_event(
         let entry = take(message.id, pending).await?;
         return match entry.stage {
             ExecStage::EditRead => advance_edit(entry, wire_result, pending).await,
-            ExecStage::Await(_) => advance_await(entry, wire_result, pending).await,
             ExecStage::Direct | ExecStage::DynamicMcp(_) | ExecStage::EditWrite(_) => {
                 completed(entry, wire_result.clone())
             }
@@ -131,11 +135,16 @@ pub async fn client_event(
 }
 
 pub async fn stream_closed(id: u32, pending: &CursorToolRuntime) -> Result<Option<ToolCompletion>> {
+    if pending.is_interrupted(id).await {
+        pending.discard_exec(id).await;
+        return Ok(None);
+    }
     let Some(entry) = pending.take_exec(id).await else {
         return Ok(None);
     };
     let error = "Cursor Exec stream closed before returning a terminal result";
-    if entry.call.name.eq_ignore_ascii_case("Shell") {
+    if entry.call.name.eq_ignore_ascii_case("Shell") || entry.call.name.eq_ignore_ascii_case("Bash")
+    {
         let command = entry
             .call
             .arguments
@@ -164,9 +173,22 @@ pub async fn stream_closed(id: u32, pending: &CursorToolRuntime) -> Result<Optio
     }
     let rendered = match &entry.stage {
         ExecStage::DynamicMcp(definition) => {
-            interaction::render_dynamic_mcp(&entry.call, definition, false)
+            Ok(super::render_dynamic_mcp(&entry.call, definition, false))
         }
-        _ => interaction::render_tool_call(&entry.call, false)?,
+        _ => super::render_tool_call(&entry.call, false),
+    };
+    let rendered = match rendered {
+        Ok(rendered) => rendered,
+        Err(Error::Protocol(message)) => {
+            return Ok(Some(compat::failure_with_message(&entry.call, message)));
+        }
+        Err(Error::Json(error)) => {
+            return Ok(Some(compat::failure_with_message(
+                &entry.call,
+                error.to_string(),
+            )));
+        }
+        Err(error) => return Err(error),
     };
     Ok(Some(ToolCompletion::from_rendered(
         &entry.call,
@@ -177,79 +199,20 @@ pub async fn stream_closed(id: u32, pending: &CursorToolRuntime) -> Result<Optio
     )?))
 }
 
-async fn advance_await(
-    entry: PendingExec,
-    result: &pb::exec_client_message::Message,
-    registry: &CursorToolRuntime,
-) -> Result<ClientExecEvent> {
-    let read = match result {
-        pb::exec_client_message::Message::ReadResult(result)
-        | pb::exec_client_message::Message::RedactedReadResult(result) => result,
-        _ => return Err(Error::Protocol("AwaitShell expected ReadResult".into())),
-    };
-    let ExecStage::Await(state) = &entry.stage else {
-        return Err(Error::Protocol(
-            "AwaitShell result reached a non-await execution stage".into(),
-        ));
-    };
-    let content = match read.result.as_ref() {
-        Some(pb::read_result::Result::Success(success)) => match success.output.as_ref() {
-            Some(pb::read_success::Output::Content(content)) => content.as_str(),
-            _ => "",
-        },
-        Some(pb::read_result::Result::FileNotFound(_)) => "",
-        Some(pb::read_result::Result::Error(error)) => {
-            return Ok(ClientExecEvent::Completed(Box::new(result::await_error(
-                entry,
-                &error.error,
-            )?)))
-        }
-        _ => "",
-    };
-    let regex_match = state
-        .regex
-        .as_ref()
-        .map(|pattern| regex::Regex::new(pattern))
-        .transpose()
-        .map_err(|error| Error::Protocol(format!("invalid AwaitShell pattern: {error}")))?
-        .and_then(|pattern| {
-            pattern
-                .find(content)
-                .map(|found| found.as_str().to_string())
-        });
-    let exit_code = content.lines().find_map(|line| {
-        line.strip_prefix("exit_code:")
-            .and_then(|value| value.trim().parse::<i32>().ok())
-    });
-    if regex_match.is_some() || exit_code.is_some() || std::time::Instant::now() >= state.deadline {
-        return Ok(ClientExecEvent::Completed(Box::new(result::await_result(
-            entry,
-            content.len() as u64,
-            regex_match,
-            exit_code,
-        )?)));
+fn is_terminal(message: &pb::exec_client_message::Message) -> bool {
+    use pb::{exec_client_message::Message, shell_stream::Event};
+
+    match message {
+        Message::ShellStream(stream) => matches!(
+            stream.event.as_ref(),
+            Some(Event::Exit(_))
+                | Some(Event::Backgrounded(_))
+                | Some(Event::Rejected(_))
+                | Some(Event::PermissionDenied(_))
+                | Some(Event::SandboxUnsupported(_))
+        ),
+        _ => true,
     }
-    let state = match entry.stage {
-        ExecStage::Await(state) => state,
-        _ => {
-            return Err(Error::Protocol(
-                "AwaitShell result changed execution stage".into(),
-            ))
-        }
-    };
-    let wait = state
-        .deadline
-        .saturating_duration_since(std::time::Instant::now())
-        .min(std::time::Duration::from_secs(1));
-    tokio::time::sleep(wait).await;
-    let call = entry.call.clone();
-    let context = entry.context.clone();
-    let id = registry
-        .reserve_await_again(&call, &context, state, entry.started_at_ms)
-        .await?;
-    Ok(ClientExecEvent::Message(Box::new(await_read_request(
-        id, &call, &context,
-    )?)))
 }
 
 async fn advance_edit(
@@ -261,10 +224,10 @@ async fn advance_edit(
         pb::exec_client_message::Message::ReadResult(result)
         | pb::exec_client_message::Message::RedactedReadResult(result) => result,
         _ => {
-            return Err(Error::Protocol(format!(
-                "expected ReadResult for edit tool {}",
-                entry.call.name
-            )))
+            let message = format!("expected ReadResult for edit tool {}", entry.call.name);
+            return Ok(ClientExecEvent::Completed(Box::new(
+                compat::failure_with_message(&entry.call, message),
+            )));
         }
     };
     let write = match edit::after_read(&entry.call, read) {
@@ -309,9 +272,14 @@ fn completed(
     pending: PendingExec,
     result: pb::exec_client_message::Message,
 ) -> Result<ClientExecEvent> {
-    Ok(ClientExecEvent::Completed(Box::new(result::from_exec(
-        pending, &result,
-    )?)))
+    let call = pending.call.clone();
+    let completion = match result::from_exec(pending, &result) {
+        Ok(completion) => completion,
+        Err(Error::Protocol(message)) => compat::failure_with_message(&call, message),
+        Err(Error::Json(error)) => compat::failure_with_message(&call, error.to_string()),
+        Err(error) => return Err(error),
+    };
+    Ok(ClientExecEvent::Completed(Box::new(completion)))
 }
 
 fn shell_exit_result(
@@ -390,7 +358,7 @@ fn shell_delta(call: &ToolCall, stdout: bool, content: &str) -> pb::AgentServerM
             content: content.into(),
         })
     };
-    interaction::server_interaction(pb::interaction_update::Message::ToolCallDelta(Box::new(
+    events::server_interaction(pb::interaction_update::Message::ToolCallDelta(Box::new(
         pb::ToolCallDeltaUpdate {
             call_id: call.call_id.clone(),
             tool_call_delta: Some(Box::new(pb::ToolCallDelta {

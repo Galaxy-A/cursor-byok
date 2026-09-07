@@ -2,7 +2,7 @@
   "tools": [
     "Shell", "Grep", "Delete", "WebSearch", "WebFetch", "GenerateImage",
     "ReadLints", "EditNotebook", "TodoWrite", "StrReplace", "Write", "Read",
-    "Glob", "AwaitShell", "GetMcpTools", "FetchMcpResource", "SwitchMode",
+    "Glob", "GetMcpTools", "FetchMcpResource", "SwitchMode",
     "UpdateCurrentStep", "CallMcpTool", "SembleSearch", "SembleFindRelated"
   ]
 }

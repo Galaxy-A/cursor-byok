@@ -93,10 +93,12 @@ pub(crate) fn apply_body(body: &mut Value, invocation: &ModelInvocation) {
     let include = object
         .entry("include")
         .or_insert_with(|| Value::Array(Vec::new()));
-    let Some(values) = include.as_array_mut() else {
+    if !include.is_array() {
         *include = Value::Array(Vec::new());
-        return;
-    };
+    }
+    let values = include
+        .as_array_mut()
+        .expect("Codex include was normalized to an array");
     if !values
         .iter()
         .any(|value| value.as_str() == Some("reasoning.encrypted_content"))
@@ -113,4 +115,75 @@ fn insert(headers: &mut HeaderMap, name: impl reqwest::header::IntoHeaderName, v
 
 fn stable_uuid(kind: &str, seed: &str) -> String {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("{kind}\0{seed}").as_bytes()).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::{ModelRequest, ModelSpec, PromptSpec};
+
+    use super::*;
+
+    fn invocation(conversation_id: &str, call_id: &str) -> ModelInvocation {
+        ModelInvocation {
+            call_id: call_id.into(),
+            run_id: "run".into(),
+            conversation_id: conversation_id.into(),
+            provider_call_index: 0,
+            request: ModelRequest {
+                prompt: PromptSpec {
+                    instructions: String::new(),
+                    tools: Vec::new(),
+                },
+                model: ModelSpec::new("gpt-test"),
+                history: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn conversation_identity_is_stable_across_turns() {
+        let first = identity(&invocation("conversation", "call-1"));
+        let second = identity(&invocation("conversation", "call-2"));
+
+        assert_eq!(first.installation_id, second.installation_id);
+        assert_eq!(first.session_id, second.session_id);
+        assert_eq!(first.thread_id, second.thread_id);
+        assert_eq!(first.window_id, second.window_id);
+        assert_ne!(first.turn_metadata, second.turn_metadata);
+    }
+
+    #[test]
+    fn applies_codex_cache_headers_and_body_contract() {
+        let invocation = invocation("conversation", "call");
+        let identity = identity(&invocation);
+        let mut headers = HeaderMap::new();
+        apply_headers(&mut headers, &identity);
+        assert_eq!(headers.get("originator").unwrap(), CODEX_CLI_ORIGINATOR);
+        assert_eq!(
+            headers.get("session-id").unwrap().to_str().unwrap(),
+            identity.thread_id.as_str()
+        );
+        assert_eq!(
+            headers.get("thread-id").unwrap().to_str().unwrap(),
+            identity.thread_id.as_str()
+        );
+
+        let mut body = serde_json::json!({
+            "tools": [{"type": "function", "name": "test"}],
+            "reasoning": {"effort": "high"},
+            "include": "invalid"
+        });
+        apply_body(&mut body, &invocation);
+
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["prompt_cache_key"], identity.thread_id);
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+    }
 }

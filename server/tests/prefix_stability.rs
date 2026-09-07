@@ -1,3 +1,4 @@
+//! Verifies append-only provider history and stable prompt prefixes.
 #[path = "support/fixtures.rs"]
 mod fixtures;
 
@@ -44,6 +45,28 @@ fn every_tool_result_is_projected_as_string_content() {
         panic!("expected tool result")
     };
     assert_eq!(string_result.content, "plain text");
+}
+
+#[test]
+fn projected_tool_result_prefixes_remain_stable() {
+    let first = vec![named_tool_result("Grep", &"x".repeat(64 * 1024))];
+    let mut second = first.clone();
+    second.push(fixtures::user("u2", "continue"));
+
+    let projected_first = project_messages(&first).unwrap();
+    let projected_second = project_messages(&second).unwrap();
+
+    assert_eq!(projected_first, projected_second[..projected_first.len()]);
+}
+
+#[test]
+fn unbounded_tool_results_are_not_rewritten() {
+    let original = "x".repeat(64 * 1024);
+    let projected = project_messages(&[named_tool_result("Delete", &original)]).unwrap();
+    let ProjectedContent::ToolResult(result) = &projected[0].content else {
+        panic!("expected tool result")
+    };
+    assert_eq!(result.content, original);
 }
 
 #[test]
@@ -117,7 +140,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             .as_path(),
     )
     .unwrap();
-    assert_eq!(assets.mode(Mode::Agent).tools.len(), 22);
+    assert_eq!(assets.mode(Mode::Agent).tools.len(), 21);
     assert_eq!(
         assets
             .mode(Mode::Agent)
@@ -141,7 +164,6 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "Glob",
             "AskQuestion",
             "Task",
-            "AwaitShell",
             "GetMcpTools",
             "FetchMcpResource",
             "SwitchMode",
@@ -172,7 +194,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "ec10becac85819cda321298762892852194c78601db66cc0b4ce74bc1213e29e",
+        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
     );
     assert_mode(
         &assets,
@@ -194,7 +216,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "e2eb8a1ebd70d53b1b2eb6bedabdce62ff070a05a6168216013d0a1144ed8bb5",
+        "9a7e0f9e0bd8ef0af01032fa311686f72c42ec260e3057f6fae5e68f5ed36fb8",
     );
     assert_mode(
         &assets,
@@ -218,7 +240,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "ec10becac85819cda321298762892852194c78601db66cc0b4ce74bc1213e29e",
+        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
     );
     assert_mode(
         &assets,
@@ -244,7 +266,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "25f7b559941baabfc9b1046455b04ca812fc41a6878ad55a43d83f0bd18cd92f",
+        "976b309dd91e314d4916439ebb9da8995751d011532e39934a1da7593dc78ccb",
     );
     assert_mode(
         &assets,
@@ -263,7 +285,6 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "Write",
             "Read",
             "Glob",
-            "AwaitShell",
             "GetMcpTools",
             "FetchMcpResource",
             "SwitchMode",
@@ -272,7 +293,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "48c8e0fe825f9c2450307ca5e70cde7077c4282c135b2cd15338bd4bd0c43636",
+        "6de1ee86a131ca093c7143f54fffcba2fc14b32ff45fd6f5e0df1347058ad744",
     );
     assert_mode(
         &assets,
@@ -282,7 +303,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
     );
     assert_eq!(
         schema_digest(&assets.mode(Mode::Agent).tools),
-        "e53a72c1d131ff3f65c619799232440b064e90e99f5d3fcceb63e32598d3a0fc"
+        "282a1dff7957090d0a75eac4a46474ac7cffa1b0937bdf97354544e729bb15c2"
     );
     let task = assets
         .mode(Mode::Agent)
@@ -519,7 +540,6 @@ fn subagent_uses_the_agent_prompt_and_only_the_captured_tool_delta() {
             "Write",
             "Read",
             "Glob",
-            "AwaitShell",
             "GetMcpTools",
             "FetchMcpResource",
             "SwitchMode",
@@ -561,6 +581,23 @@ fn tool_result_with_call(
                 .as_str()
                 .map(str::to_string)
                 .unwrap_or_else(|| output.to_string()),
+            is_error: false,
+            image: None,
+            provider_parts: Vec::new(),
+        }),
+        runtime_event_id: None,
+    }
+}
+
+fn named_tool_result(name: &str, output: &str) -> CanonicalMessage {
+    CanonicalMessage {
+        message_id: format!("result-{name}"),
+        role: Role::Tool,
+        origin: Origin::Tool,
+        content: MessageContent::ToolResult(ToolResultContent {
+            call_id: format!("call-{name}"),
+            name: name.into(),
+            content: output.into(),
             is_error: false,
             image: None,
             provider_parts: Vec::new(),

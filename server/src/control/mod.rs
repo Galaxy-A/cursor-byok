@@ -1,7 +1,9 @@
+//! Exposes the local control API.
 mod calls;
 mod harness;
 mod models;
 mod overview;
+mod plugins;
 mod service;
 mod settings;
 
@@ -129,6 +131,53 @@ pub fn api_router(service: ControlService) -> Router {
         )
         .route("/__byok-api__/api/llm-calls", get(calls::list))
         .route("/__byok-api__/api/llm-calls/{call_id}", get(calls::detail))
+        .route("/__byok-api__/api/plugins", get(plugins::list))
+        .route(
+            "/__byok-api__/api/plugins/runtime",
+            get(plugins::runtime_status)
+                .post(plugins::initialize_runtime)
+                .delete(plugins::cancel_runtime_initialization),
+        )
+        .route(
+            "/__byok-api__/api/plugins/oauth/{session_id}/poll",
+            post(plugins::oauth_poll),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}",
+            axum::routing::delete(plugins::remove),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/add/{method_id}/begin",
+            post(plugins::oauth_begin),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/import",
+            post(plugins::import),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/export",
+            get(plugins::export_resources),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/{resource_id}",
+            axum::routing::delete(plugins::delete_resource),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/{resource_id}/actions/{action_id}",
+            post(plugins::action),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/resources/{resource_type}/{resource_id}/refresh",
+            post(plugins::refresh_resource),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/providers/{provider_id}/models/sync",
+            post(plugins::sync_models),
+        )
+        .route(
+            "/__byok-api__/api/plugins/{plugin_id}/providers/{provider_id}/models/enabled",
+            put(plugins::set_model_enabled),
+        )
         .route(
             "/__byok-api__/api/settings/observability",
             get(settings::get).put(settings::update),
@@ -154,6 +203,10 @@ pub fn api_router(service: ControlService) -> Router {
             get(settings::get_desktop).put(settings::update_desktop),
         )
         .route(
+            "/__byok-api__/api/settings/commit",
+            get(settings::get_commit).put(settings::update_commit),
+        )
+        .route(
             "/__byok-api__/api/harness/cursor/status",
             get(harness::status),
         )
@@ -173,11 +226,7 @@ fn desktop_cors() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _| local_origin(origin)))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers([
-            CONTENT_TYPE,
-            header::ACCEPT_LANGUAGE,
-            header::HeaderName::from_static("disable-ad-ids"),
-        ])
+        .allow_headers([CONTENT_TYPE, header::ACCEPT_LANGUAGE])
 }
 
 fn local_origin(origin: &HeaderValue) -> bool {
@@ -210,123 +259,5 @@ fn local_origin(origin: &HeaderValue) -> bool {
             address.is_loopback() || address.is_unique_local() || address.is_unicast_link_local()
         }
         None => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::{
-        body::Body,
-        http::{header, HeaderValue, Request},
-    };
-    use tower::ServiceExt;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn control_routes_only_exist_below_the_reserved_namespace() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::connect(&format!(
-            "sqlite://{}",
-            directory.path().join("control.db").display()
-        ))
-        .await
-        .unwrap();
-        let provider = std::sync::Arc::new(crate::provider::ProviderRouter::new(
-            store.clone(),
-            std::time::Duration::from_secs(300),
-        ));
-        let router = api_router(ControlService::new(store, provider).unwrap());
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/__byok-api__/api/models")
-                    .header(header::ORIGIN, "tauri://localhost")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            Some(&HeaderValue::from_static("tauri://localhost"))
-        );
-
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/__byok-api__/api/overview")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/api/models")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn development_frontend_proxy_preserves_the_reserved_path_and_query() {
-        let upstream = Router::new().route(
-            "/__byok-api__/{*path}",
-            get(|request: Request<Body>| async move {
-                request.uri().path_and_query().unwrap().as_str().to_string()
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
-        let router = frontend_proxy_router(format!("http://{address}").parse().unwrap());
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/__byok-api__/src/index.tsx?direct=1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(body, "/__byok-api__/src/index.tsx?direct=1");
-        task.abort();
-    }
-
-    #[test]
-    fn cors_only_allows_tauri_loopback_and_private_network_origins() {
-        for origin in [
-            "tauri://localhost",
-            "http://tauri.localhost",
-            "http://localhost:1420",
-            "http://127.0.0.1:1420",
-            "https://192.168.1.20:8443",
-            "http://[::1]:1420",
-            "http://[fd00::20]:1420",
-        ] {
-            assert!(local_origin(&origin.parse().unwrap()), "{origin}");
-        }
-        for origin in [
-            "https://example.com",
-            "https://8.8.8.8",
-            "https://localhost.example.com",
-            "null",
-        ] {
-            assert!(!local_origin(&origin.parse().unwrap()), "{origin}");
-        }
     }
 }

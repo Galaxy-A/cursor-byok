@@ -1,7 +1,8 @@
+//! Persists Run ownership, status, and provider call progress.
 use sqlx::Row;
 
 use crate::{
-    model::{ConversationId, PreparedRun, RevisionId, RunId, RunKind, Usage},
+    model::{CheckpointId, ConversationId, PreparedRun, RunId, RunKind, Usage},
     Error, Result,
 };
 
@@ -30,7 +31,7 @@ impl RunStatus {
 pub struct ClaimedRun {
     pub run_id: RunId,
     pub conversation_id: ConversationId,
-    pub head_revision_id: RevisionId,
+    pub head_checkpoint_id: CheckpointId,
     pub replaced_run_id: Option<RunId>,
 }
 
@@ -42,18 +43,18 @@ impl Store {
         Self::ensure_conversation_tx(&mut tx, &prepared.conversation_id).await?;
         let belongs: bool = sqlx::query_scalar(
             "SELECT EXISTS(
-                SELECT 1 FROM conversation_revisions
-                WHERE revision_id = ? AND conversation_id = ?
+                SELECT 1 FROM conversation_checkpoints
+                WHERE checkpoint_id = ? AND conversation_id = ?
              )",
         )
-        .bind(prepared.base_revision_id.0)
+        .bind(prepared.base_checkpoint_id.0)
         .bind(prepared.conversation_id.as_str())
         .fetch_one(&mut *tx)
         .await?;
         if !belongs {
             return Err(Error::Store(format!(
-                "base revision {} does not belong to conversation {}",
-                prepared.base_revision_id, prepared.conversation_id
+                "base checkpoint {} does not belong to conversation {}",
+                prepared.base_checkpoint_id, prepared.conversation_id
             )));
         }
 
@@ -89,7 +90,7 @@ impl Store {
             run_kind_columns(&prepared.kind);
         sqlx::query(
             "INSERT INTO runs
-             (run_id, cursor_request_id, conversation_id, base_revision_id, head_revision_id,
+             (run_id, cursor_request_id, conversation_id, base_checkpoint_id, head_checkpoint_id,
               parent_run_id, parent_tool_call_id, run_kind, subagent_kind,
               status, created_at_ms, updated_at_ms)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
@@ -97,8 +98,8 @@ impl Store {
         .bind(prepared.run_id.as_str())
         .bind(prepared.cursor_request_id.as_deref())
         .bind(prepared.conversation_id.as_str())
-        .bind(prepared.base_revision_id.0)
-        .bind(prepared.base_revision_id.0)
+        .bind(prepared.base_checkpoint_id.0)
+        .bind(prepared.base_checkpoint_id.0)
         .bind(parent_run_id)
         .bind(parent_tool_call_id)
         .bind(run_kind)
@@ -110,10 +111,10 @@ impl Store {
 
         sqlx::query(
             "UPDATE conversations
-             SET current_revision_id = ?, active_run_id = ?, updated_at_ms = ?
+             SET current_checkpoint_id = ?, active_run_id = ?, updated_at_ms = ?
              WHERE conversation_id = ?",
         )
-        .bind(prepared.base_revision_id.0)
+        .bind(prepared.base_checkpoint_id.0)
         .bind(prepared.run_id.as_str())
         .bind(now)
         .bind(prepared.conversation_id.as_str())
@@ -123,7 +124,7 @@ impl Store {
         Ok(ClaimedRun {
             run_id: prepared.run_id.clone(),
             conversation_id: prepared.conversation_id.clone(),
-            head_revision_id: prepared.base_revision_id,
+            head_checkpoint_id: prepared.base_checkpoint_id,
             replaced_run_id: replaced
                 .filter(|run| run != prepared.run_id.as_str())
                 .map(RunId),

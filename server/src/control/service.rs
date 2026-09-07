@@ -1,3 +1,4 @@
+//! Implements control API routing and shared state.
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -12,17 +13,18 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
-    harness::CursorHarness,
+    local_app::CursorHarness,
     model::{
         ContentPart, CursorRunTraceArtifact, CursorRunTraceSummary, LlmCallRequest,
         LlmCallResponseChunk, LlmCallSummary, ModelConfig, ModelConfigInput, ModelInvocation,
         ModelRequest, ModelSpec, ModelType, Overview, ProjectedContent, ProjectedMessage,
         PromptSpec, ProviderType, Role,
     },
-    provider::{ModelEvent, Provider},
+    plugin::{PluginDescriptor, PluginRegistry, PluginRuntime, PluginRuntimeStatus},
+    provider::{is_valid_response_event, ModelEvent, Provider},
     store::{
-        DesktopSettings, PortSettings, ProxySettings, ProxySettingsInput, StatisticsStorage, Store,
-        TabSettings,
+        CommitSettings, DesktopSettings, PortSettings, ProxySettings, ProxySettingsInput,
+        StatisticsStorage, Store, TabSettings,
     },
     Error, Result,
 };
@@ -32,6 +34,9 @@ pub struct ControlService {
     store: Store,
     cursor_harness: CursorHarness,
     provider: Arc<dyn Provider>,
+    plugin_runtime: PluginRuntime,
+    plugins: PluginRegistry,
+    clients: crate::network::NetworkClients,
     model_tests: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
     model_test_timeout: Duration,
 }
@@ -91,7 +96,7 @@ fn empty_json_object_ref() -> &'static serde_json::Value {
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelConnectivityResult {
     pub duration_ms: u64,
-    pub first_text_ms: Option<u64>,
+    pub first_valid_response_ms: Option<u64>,
     pub output_tokens: u64,
     pub tokens_per_second: f64,
     pub tokens_estimated: bool,
@@ -138,28 +143,142 @@ pub struct ObservabilitySettings {
 }
 
 impl ControlService {
-    pub fn new(store: Store, provider: Arc<dyn Provider>) -> Result<Self> {
-        Self::new_with_timeout(store, provider, Duration::from_secs(300))
-    }
-
-    pub fn new_with_timeout(
+    pub fn new(
         store: Store,
         provider: Arc<dyn Provider>,
-        provider_timeout: Duration,
+        plugin_runtime: PluginRuntime,
+        plugins: PluginRegistry,
+        clients: crate::network::NetworkClients,
+        provider_request_timeout: Duration,
+        provider_stream_idle_timeout: Duration,
     ) -> Result<Self> {
         Ok(Self {
             cursor_harness: CursorHarness::new(store.clone())?,
             store,
             provider,
+            plugin_runtime,
+            plugins,
+            clients,
             model_tests: Arc::new(Mutex::new(BTreeMap::new())),
-            model_test_timeout: provider_timeout
-                .max(Duration::from_secs(300))
-                .saturating_add(Duration::from_secs(60)),
+            model_test_timeout: model_test_timeout(
+                provider_request_timeout,
+                provider_stream_idle_timeout,
+            ),
         })
     }
 
     pub fn cursor_harness(&self) -> &CursorHarness {
         &self.cursor_harness
+    }
+
+    pub async fn plugins(&self) -> Vec<PluginDescriptor> {
+        self.plugins.plugins().await
+    }
+
+    pub async fn plugin_oauth_begin(
+        &self,
+        plugin_id: &str,
+        resource_type: &str,
+        method_id: &str,
+    ) -> Result<crate::plugin::OAuthBeginResponse> {
+        self.plugins
+            .oauth_begin(plugin_id, resource_type, method_id)
+            .await
+    }
+
+    pub async fn plugin_oauth_poll(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::plugin::OAuthPollResponse> {
+        self.plugins.oauth_poll(session_id).await
+    }
+
+    pub async fn plugin_import(
+        &self,
+        plugin_id: &str,
+        resource_type: &str,
+        files: serde_json::Value,
+    ) -> Result<crate::plugin::ImportResponse> {
+        self.plugins
+            .import_resources(plugin_id, resource_type, files)
+            .await
+    }
+
+    pub async fn plugin_export_resources(
+        &self,
+        plugin_id: &str,
+        resource_type: &str,
+    ) -> Result<serde_json::Value> {
+        self.plugins
+            .export_resources(plugin_id, resource_type)
+            .await
+    }
+
+    pub async fn plugin_refresh_resource(
+        &self,
+        plugin_id: &str,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<()> {
+        self.plugins
+            .refresh_resource(plugin_id, resource_type, resource_id)
+            .await
+    }
+
+    pub async fn plugin_resource_action(
+        &self,
+        plugin_id: &str,
+        resource_type: &str,
+        resource_id: &str,
+        action_id: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.plugins
+            .resource_action(plugin_id, resource_type, resource_id, action_id, input)
+            .await
+    }
+
+    pub async fn plugin_delete_resource(
+        &self,
+        plugin_id: &str,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<()> {
+        self.plugins
+            .delete_resource(plugin_id, resource_type, resource_id)
+            .await
+    }
+
+    pub async fn plugin_sync_models(&self, plugin_id: &str, provider_id: &str) -> Result<usize> {
+        self.plugins.sync_models(plugin_id, provider_id).await
+    }
+
+    pub async fn plugin_set_model_enabled(
+        &self,
+        plugin_id: &str,
+        provider_id: &str,
+        model_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        self.plugins
+            .set_model_enabled(plugin_id, provider_id, model_id, enabled)
+            .await
+    }
+
+    pub async fn remove_plugin_configuration(&self, plugin_id: &str) -> Result<()> {
+        self.plugins.remove(plugin_id).await
+    }
+
+    pub fn plugin_runtime_status(&self) -> PluginRuntimeStatus {
+        self.plugin_runtime.status()
+    }
+
+    pub fn initialize_plugin_runtime(&self) -> PluginRuntimeStatus {
+        self.plugin_runtime.initialize(self.store.clone())
+    }
+
+    pub fn cancel_plugin_runtime_initialization(&self) -> PluginRuntimeStatus {
+        self.plugin_runtime.cancel_initialization()
     }
 
     pub async fn models(&self) -> Result<Vec<ModelConfig>> {
@@ -171,8 +290,11 @@ impl ControlService {
         start_ms: Option<i64>,
         end_ms: Option<i64>,
         model_hashes: Option<&str>,
+        bucket_ms: Option<i64>,
     ) -> Result<Overview> {
-        self.store.overview(start_ms, end_ms, model_hashes).await
+        self.store
+            .overview(start_ms, end_ms, model_hashes, bucket_ms)
+            .await
     }
 
     pub async fn create_models(&self, models: &[ModelConfigInput]) -> Result<Vec<ModelConfig>> {
@@ -237,14 +359,20 @@ impl ControlService {
     ) -> Result<ModelConnectivityResult> {
         const TEST_PROMPT: &str = "Output the numbers 1 through 120 separated by a single space. No commas, no newlines, no explanation.";
 
-        let configured = self
-            .store
-            .model(model_hash)
-            .await?
-            .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
         let mut model = ModelSpec::new(model_hash);
-        configured.configure(&mut model);
-        model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
+        if model_hash.starts_with(crate::plugin::ADAPTER_ID_PREFIX) {
+            let descriptor = self.plugins.model_descriptor(model_hash).await?;
+            model.display_name = Some(descriptor.display_name);
+            model.max_output_tokens = Some(descriptor.max_output_tokens.unwrap_or(65_536));
+        } else {
+            let configured = self
+                .store
+                .model(model_hash)
+                .await?
+                .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
+            configured.configure(&mut model);
+            model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
+        }
         let call_id = format!("model-test-{}", uuid::Uuid::new_v4());
         let invocation = ModelInvocation {
             call_id: call_id.clone(),
@@ -267,7 +395,7 @@ impl ControlService {
             },
         };
         let started = Instant::now();
-        let mut first_text_at = None;
+        let mut first_valid_response_at = None;
         let mut output_tokens = None;
         let mut output = String::new();
         let stream = self.provider.stream(invocation, cancellation.clone());
@@ -276,11 +404,12 @@ impl ControlService {
             futures_util::pin_mut!(stream);
             let mut finished = false;
             while let Some(event) = stream.next().await {
-                match event? {
+                let event = event?;
+                if first_valid_response_at.is_none() && is_valid_response_event(&event) {
+                    first_valid_response_at = Some(Instant::now());
+                }
+                match event {
                     ModelEvent::TextDelta(delta) => {
-                        if first_text_at.is_none() && !delta.trim().is_empty() {
-                            first_text_at = Some(Instant::now());
-                        }
                         output.push_str(&delta);
                     }
                     ModelEvent::Usage(usage) => {
@@ -328,16 +457,16 @@ impl ControlService {
         }
         let elapsed = started.elapsed();
         let output = output.trim().to_string();
-        if first_text_at.is_none() {
+        if first_valid_response_at.is_none() {
             return Err(Error::Provider(
-                "model connectivity test received no text output".into(),
+                "model connectivity test received no valid response".into(),
             ));
         }
         let tokens_estimated = output_tokens.is_none();
         let output_tokens = output_tokens.unwrap_or_else(|| estimate_output_tokens(&output));
         Ok(ModelConnectivityResult {
             duration_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
-            first_text_ms: first_text_at.map(|first| {
+            first_valid_response_ms: first_valid_response_at.map(|first| {
                 first
                     .duration_since(started)
                     .as_millis()
@@ -355,7 +484,7 @@ impl ControlService {
     }
 
     pub async fn discover_models(&self, input: &ModelDiscoveryInput) -> Result<DiscoveredModels> {
-        let client = crate::network::client(&self.store).await?;
+        let client = self.clients.default_client().await?;
         let base_url = crate::model::normalize_request_url(&input.base_url)?;
         discover_models_from_endpoint(
             &client,
@@ -513,12 +642,25 @@ impl ControlService {
         self.store.clear_statistics_storage().await
     }
 
+    pub async fn clear_all_statistics_storage(&self) -> Result<StatisticsStorage> {
+        self.store.clear_all_statistics_storage().await
+    }
+
     pub async fn proxy_settings(&self) -> Result<ProxySettings> {
         self.store.proxy_settings().await
     }
 
     pub async fn set_proxy_settings(&self, settings: ProxySettingsInput) -> Result<ProxySettings> {
-        self.store.set_proxy_settings(settings).await
+        if settings.mode.is_custom() {
+            let local_proxy_port = match self.cursor_harness.proxy_port().await {
+                Some(port) => port,
+                None => self.store.port_settings().await?.proxy_port,
+            };
+            crate::network::reject_self_proxy(&settings.address, local_proxy_port)?;
+        }
+        let settings = self.store.set_proxy_settings(settings).await?;
+        self.clients.invalidate().await;
+        Ok(settings)
     }
 
     pub async fn tab_settings(&self) -> Result<TabSettings> {
@@ -536,6 +678,24 @@ impl ControlService {
     pub async fn set_desktop_settings(&self, settings: DesktopSettings) -> Result<()> {
         self.store.set_desktop_settings(settings).await
     }
+
+    pub async fn commit_settings(&self) -> Result<CommitSettings> {
+        self.store.commit_settings().await
+    }
+
+    pub async fn set_commit_settings(&self, settings: CommitSettings) -> Result<CommitSettings> {
+        self.store.set_commit_settings(settings).await
+    }
+}
+
+fn model_test_timeout(
+    provider_request_timeout: Duration,
+    provider_stream_idle_timeout: Duration,
+) -> Duration {
+    provider_request_timeout
+        .max(provider_stream_idle_timeout)
+        .max(Duration::from_secs(300))
+        .saturating_add(Duration::from_secs(60))
 }
 
 fn official_call(trace: CursorRunTraceSummary) -> CallSummary {
@@ -572,10 +732,12 @@ fn official_call(trace: CursorRunTraceSummary) -> CallSummary {
             response_headers_at_ms: trace.first_response_at_ms,
             first_event_at_ms: trace.first_response_at_ms,
             first_text_at_ms: None,
+            first_valid_response_at_ms: None,
             finished_at_ms: trace.finished_at_ms,
             queue_ms: None,
             ttfb_ms: ttfb,
             ttft_ms: None,
+            ttfr_ms: None,
             duration_ms: duration,
             input_tokens: None,
             output_tokens: None,
@@ -638,6 +800,11 @@ async fn discover_models_from_endpoint(
         }
         ProviderType::Anthropic => {
             anthropic_models(client, base_url, api_key, custom_headers).await?
+        }
+        ProviderType::Plugin => {
+            return Err(Error::Config(
+                "plugin providers discover models through their plugin".into(),
+            ))
         }
     };
     models.sort();
@@ -870,7 +1037,6 @@ fn apply_discovery_headers(
     }
     Ok(request)
 }
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -884,6 +1050,38 @@ mod tests {
     };
 
     use super::{model_discovery_url, model_discovery_urls, ControlService};
+
+    impl ControlService {
+        fn new_for_test(store: Store, provider: Arc<dyn Provider>) -> crate::Result<Self> {
+            let plugin_runtime = crate::plugin::PluginRuntime::managed()?;
+            let plugins = crate::plugin::PluginRegistry::managed(
+                store.clone(),
+                plugin_runtime.clone(),
+                "test".into(),
+            )?;
+            let clients = crate::network::NetworkClients::new(store.clone());
+            Self::new(
+                store,
+                provider,
+                plugin_runtime,
+                plugins,
+                clients,
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(5),
+            )
+        }
+    }
+
+    #[test]
+    fn connectivity_timeout_exceeds_all_provider_boundaries() {
+        assert_eq!(
+            super::model_test_timeout(
+                std::time::Duration::from_secs(120),
+                std::time::Duration::from_secs(600),
+            ),
+            std::time::Duration::from_secs(660)
+        );
+    }
 
     #[test]
     fn model_discovery_url_appends_to_path() {
@@ -1027,6 +1225,7 @@ mod tests {
             .create_model(&ModelConfigInput {
                 model_id: "reasoning-model".into(),
                 display_name: "Reasoning Model".into(),
+                group_name: None,
                 model_type: ModelType::OpenAi,
                 base_url: "https://example.com/v1/responses".into(),
                 use_full_url: true,
@@ -1063,7 +1262,7 @@ mod tests {
         .unwrap();
         let invocation = Arc::new(Mutex::new(None));
         let model = create_test_model(&store).await;
-        let service = ControlService::new(
+        let service = ControlService::new_for_test(
             store,
             Arc::new(TestProvider {
                 invocation: invocation.clone(),
@@ -1107,7 +1306,7 @@ mod tests {
         .unwrap();
         let model = create_test_model(&store).await;
         let started = Arc::new(tokio::sync::Notify::new());
-        let service = ControlService::new(
+        let service = ControlService::new_for_test(
             store,
             Arc::new(CancellationProvider {
                 started: started.clone(),
@@ -1186,7 +1385,7 @@ mod tests {
         ))
         .await
         .unwrap();
-        let service = ControlService::new(
+        let service = ControlService::new_for_test(
             store,
             Arc::new(TestProvider {
                 invocation: Arc::new(Mutex::new(None)),

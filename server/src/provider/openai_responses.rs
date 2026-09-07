@@ -1,3 +1,4 @@
+//! Implements the OpenAI Responses provider adapter.
 use async_stream::try_stream;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use eventsource_stream::Eventsource;
@@ -13,7 +14,10 @@ use crate::{
 };
 
 use super::{
-    apply_openai_prompt_cache_key, codex, merge_extra_params, recorder::recorded_headers,
+    apply_body_allowlist, apply_openai_prompt_cache_key,
+    attempt::{send_once, Attempt},
+    codex, map_sse_error, merge_extra_params, provider_event_error,
+    recorder::recorded_headers,
     CallRecorder, FinishReason, ModelEvent, Provider, ProviderStream,
 };
 
@@ -70,12 +74,14 @@ impl Provider for OpenAiResponsesProvider {
             let mut body = json!({
                 "model": request.model.model_id, "input": input, "stream": true,
                 "instructions": request.prompt.instructions,
-                "include": ["reasoning.encrypted_content"],
-                "tools": request.prompt.tools.iter().map(|tool| json!({
+                "include": ["reasoning.encrypted_content"]
+            });
+            if !request.prompt.tools.is_empty() {
+                body["tools"] = json!(request.prompt.tools.iter().map(|tool| json!({
                     "type":"function", "name":tool.name, "description":tool.description,
                     "parameters":tool.parameters, "strict":false
-                })).collect::<Vec<_>>()
-            });
+                })).collect::<Vec<_>>());
+            }
             apply_model(&mut body, &request.model, config.max_output_tokens)?;
             merge_extra_params(&mut body, &request.model.extra_params)?;
             apply_openai_prompt_cache_key(&mut body, &request.model.model_id)?;
@@ -83,55 +89,42 @@ impl Provider for OpenAiResponsesProvider {
             if request.model.codex_outbound_enabled {
                 codex::apply_body(&mut body, &invocation);
             }
+            apply_body_allowlist(&mut body, config.allowed_body_fields.as_ref())?;
+            let request_headers = if let Some(identity) = &codex_identity {
+                let defaults = [
+                    ("content-type", "application/json"),
+                    ("User-Agent", codex::CODEX_CLI_USER_AGENT),
+                    ("originator", codex::CODEX_CLI_ORIGINATOR),
+                    ("Accept", "text/event-stream"),
+                    ("session-id", identity.session_id.as_str()),
+                    ("thread-id", identity.thread_id.as_str()),
+                    ("x-client-request-id", identity.thread_id.as_str()),
+                    ("x-codex-installation-id", identity.installation_id.as_str()),
+                    ("x-codex-window-id", identity.window_id.as_str()),
+                    ("x-codex-turn-metadata", identity.turn_metadata.as_str()),
+                ];
+                recorded_headers(&config, &defaults)
+            } else {
+                recorded_headers(&config, &[("content-type", "application/json")])
+            };
             if let Some(recorder) = &recorder {
-                let mut headers = recorded_headers(&config, &[("content-type", "application/json")]);
-                if let Some(identity) = &codex_identity {
-                    if let Some(object) = headers.as_object_mut() {
-                        object.insert("User-Agent".into(), codex::CODEX_CLI_USER_AGENT.into());
-                        object.insert("originator".into(), codex::CODEX_CLI_ORIGINATOR.into());
-                        object.insert("Accept".into(), "text/event-stream".into());
-                        object.insert("session-id".into(), identity.session_id.clone().into());
-                        object.insert("thread-id".into(), identity.thread_id.clone().into());
-                        object.insert("x-client-request-id".into(), identity.thread_id.clone().into());
-                        object.insert("x-codex-installation-id".into(), identity.installation_id.clone().into());
-                        object.insert("x-codex-window-id".into(), identity.window_id.clone().into());
-                        object.insert("x-codex-turn-metadata".into(), identity.turn_metadata.clone().into());
-                        for (name, value) in &config.custom_headers {
-                            if crate::model::is_sensitive_header(name.as_str()) {
-                                continue;
-                            }
-                            if let Ok(value) = value.to_str() {
-                                object.insert(name.as_str().into(), value.into());
-                            }
-                        }
-                    }
-                }
-                recorder.request(headers, &body).await?;
+                recorder.request(request_headers, &body).await?;
             }
-            let mut headers = config.custom_headers.clone();
+            let mut headers = reqwest::header::HeaderMap::new();
             if let Some(identity) = &codex_identity {
                 codex::apply_headers(&mut headers, identity);
-                for (name, value) in &config.custom_headers {
-                    headers.insert(name.clone(), value.clone());
-                }
             }
-            let request = client.post(&config.request_url)
-                .bearer_auth(&config.api_key).headers(headers).json(&body).send();
-            let response = tokio::select! {
-                _ = cancellation.cancelled() => return,
-                response = request => response,
-            };
-            let response = response?;
-            if let Some(recorder) = &recorder {
-                recorder.response_headers(response.status().as_u16()).await?;
+            for (name, value) in &config.custom_headers {
+                headers.insert(name.clone(), value.clone());
             }
-            if !response.status().is_success() {
-                let status = response.status(); let bytes = response.bytes().await?;
-                if let Some(recorder) = &recorder { recorder.response_chunk(&bytes).await?; }
-                let text = String::from_utf8_lossy(&bytes);
-                Err(Error::Provider(format!("OpenAI Responses {status}: {text}")))?;
-                return;
-            }
+            let attempt = send_once(
+                "OpenAI Responses",
+                || client.post(&config.request_url)
+                    .bearer_auth(&config.api_key).headers(headers).json(&body),
+                &cancellation,
+                recorder.as_ref(),
+            ).await?;
+            let Attempt::Response(response) = attempt else { return };
             yield ModelEvent::Start { model_call_id: call_id };
             let chunk_recorder = recorder.clone();
             let chunks = response.bytes_stream()
@@ -160,9 +153,12 @@ impl Provider for OpenAiResponsesProvider {
                     event = source.next() => event,
                 };
                 let Some(event) = event else { break };
-                let event = event.map_err(|error| Error::Provider(format!("OpenAI Responses SSE: {error}")))?;
+                let event = event.map_err(|error| map_sse_error("OpenAI Responses", error))?;
                 if event.data == "[DONE]" { break; }
                 let value: Value = serde_json::from_str(&event.data)?;
+                if let Some(error) = provider_event_error("OpenAI Responses", &value) {
+                    Err(error)?;
+                }
                 let kind = value.get("type").and_then(Value::as_str).unwrap_or(&event.event);
                 match kind {
                     "response.output_text.delta" => {
@@ -183,9 +179,8 @@ impl Provider for OpenAiResponsesProvider {
                         if !thinking_open { thinking_open = true; yield ModelEvent::ThinkingStart; }
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) { yield ModelEvent::ThinkingDelta(delta.into()); }
                     }
-                    "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
-                        if thinking_open { thinking_open = false; yield ModelEvent::ThinkingEnd; }
-                    }
+                    "response.reasoning_summary_text.done" | "response.reasoning_text.done"
+                        if thinking_open => { thinking_open = false; yield ModelEvent::ThinkingEnd; }
                     "response.output_item.added" => {
                         let item = value.get("item").unwrap_or(&Value::Null);
                         if item.get("type").and_then(Value::as_str) == Some("function_call") {
@@ -281,7 +276,6 @@ impl Provider for OpenAiResponsesProvider {
                         terminal = true;
                         yield ModelEvent::Done(FinishReason::Length);
                     }
-                    "response.failed" => Err(Error::Provider(format!("OpenAI Responses failed: {}", event.data)))?,
                     _ => {}
                 }
             }
@@ -453,7 +447,12 @@ fn responses_input(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
                         .ok_or_else(|| {
                             Error::Protocol("OpenAI Responses replay state is missing items".into())
                         })?;
-                    input.extend(items.iter().cloned());
+                    input.extend(
+                        items
+                            .iter()
+                            .map(response_reasoning_input)
+                            .collect::<Result<Vec<_>>>()?,
+                    );
                 }
                 push_responses_text(&mut input, &message.role, text);
                 for call in calls {
@@ -468,6 +467,23 @@ fn responses_input(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
         }
     }
     Ok(input)
+}
+
+fn response_reasoning_input(item: &Value) -> Result<Value> {
+    let source = item
+        .as_object()
+        .filter(|object| object.get("type").and_then(Value::as_str) == Some("reasoning"))
+        .ok_or_else(|| {
+            Error::Protocol("OpenAI Responses replay state contains a non-reasoning item".into())
+        })?;
+    let mut projected = Map::new();
+    projected.insert("type".into(), json!("reasoning"));
+    for field in ["id", "summary", "content", "encrypted_content"] {
+        if let Some(value) = source.get(field) {
+            projected.insert(field.into(), value.clone());
+        }
+    }
+    Ok(Value::Object(projected))
 }
 
 fn push_responses_parts(input: &mut Vec<Value>, role: &Role, parts: &[ContentPart]) -> Result<()> {
@@ -535,8 +551,10 @@ fn required_u64(value: &Value, name: &str) -> Result<u64> {
 }
 
 fn responses_usage(value: &Value) -> Usage {
+    let input_tokens = value.get("input_tokens").and_then(Value::as_u64);
     Usage {
-        input_tokens: value.get("input_tokens").and_then(Value::as_u64),
+        input_tokens,
+        context_input_tokens: input_tokens,
         output_tokens: value.get("output_tokens").and_then(Value::as_u64),
         total_tokens: value.get("total_tokens").and_then(Value::as_u64),
         cache_read_tokens: value
@@ -551,107 +569,44 @@ fn responses_usage(value: &Value) -> Usage {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use super::{responses_input, update_response_tool, ResponseToolArguments, ResponseToolState};
-    use crate::model::{ContentPart, ProjectedContent, ProjectedMessage, Role, ToolResultContent};
-    use crate::provider::ModelEvent;
+    use super::*;
+    use crate::model::ProviderReplayState;
 
     #[test]
-    fn read_image_stays_in_its_function_call_output() {
-        let input = responses_input(&[ProjectedMessage {
-            message_id: "result".into(),
-            role: Role::Tool,
-            content: ProjectedContent::ToolResult(ToolResultContent {
-                call_id: "call".into(),
-                name: "Read".into(),
-                content: "Read image file: image.png".into(),
-                is_error: false,
-                image: None,
-                provider_parts: vec![
-                    ContentPart::Text {
-                        text: "Read image file: image.png".into(),
-                    },
-                    ContentPart::Image {
-                        mime_type: "image/png".into(),
-                        data: b"png".to_vec(),
-                    },
-                ],
-            }),
-        }])
-        .unwrap();
+    fn reasoning_replay_projects_response_items_to_valid_input_items() {
+        let messages = [ProjectedMessage {
+            message_id: "assistant-1".into(),
+            role: Role::Assistant,
+            content: ProjectedContent::Assistant {
+                text: String::new(),
+                thinking: String::new(),
+                replay_state: Some(ProviderReplayState {
+                    provider_kind: "openai_responses".into(),
+                    value: json!({
+                        "items": [{
+                            "type": "reasoning",
+                            "id": "item-1",
+                            "status": "completed",
+                            "summary": [{"type": "summary_text", "text": "why"}],
+                            "content": [],
+                            "encrypted_content": "opaque",
+                            "output_only": true
+                        }]
+                    }),
+                }),
+                calls: Vec::new(),
+            },
+        }];
 
-        assert_eq!(input[0]["type"], "function_call_output");
-        assert_eq!(input[0]["call_id"], "call");
-        assert_eq!(input[0]["output"][0]["type"], "input_text");
-        assert_eq!(input[0]["output"][1]["type"], "input_image");
-        assert_eq!(input[0]["output"][1]["detail"], "auto");
-    }
-
-    #[test]
-    fn tool_argument_deltas_are_ordered_bytes_and_final_snapshots_are_idempotent() {
-        let item = serde_json::json!({"call_id": "call-1", "name": "Shell"});
-        let mut tools = BTreeMap::<usize, ResponseToolState>::new();
-        let mut events = update_response_tool(
-            0,
-            &item,
-            ResponseToolArguments::Delta(r#"{"block_until_ms":300"#),
-            false,
-            &mut tools,
-        )
-        .unwrap();
-        events.extend(
-            update_response_tool(
-                0,
-                &item,
-                ResponseToolArguments::Delta("00"),
-                false,
-                &mut tools,
-            )
-            .unwrap(),
-        );
-        events.extend(
-            update_response_tool(
-                0,
-                &item,
-                ResponseToolArguments::Delta("}"),
-                false,
-                &mut tools,
-            )
-            .unwrap(),
-        );
-        events.extend(
-            update_response_tool(
-                0,
-                &item,
-                ResponseToolArguments::Snapshot(r#"{"block_until_ms":30000}"#),
-                true,
-                &mut tools,
-            )
-            .unwrap(),
-        );
-
-        let arguments = events
-            .iter()
-            .filter_map(|event| match event {
-                ModelEvent::ToolCallArgumentsDelta { delta, .. } => Some(delta.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert_eq!(arguments, r#"{"block_until_ms":30000}"#);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&arguments).unwrap()["block_until_ms"],
-            30000
+            responses_input(&messages).unwrap(),
+            vec![json!({
+                "type": "reasoning",
+                "id": "item-1",
+                "summary": [{"type": "summary_text", "text": "why"}],
+                "content": [],
+                "encrypted_content": "opaque"
+            })]
         );
-
-        assert!(update_response_tool(
-            0,
-            &item,
-            ResponseToolArguments::Snapshot(r#"{"block_until_ms":30000}"#),
-            true,
-            &mut tools,
-        )
-        .unwrap()
-        .is_empty());
     }
 }

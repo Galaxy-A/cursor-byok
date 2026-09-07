@@ -1,5 +1,6 @@
+//! Restores Conversation Messages and pending Tool state from a checkpoint.
 use crate::{
-    cursor::{projection, proto::agent::v1 as pb},
+    cursor::{checkpoint::messages, protocol::proto::agent::v1 as pb},
     model::CanonicalMessage,
     store::BlobId,
     Error, Result,
@@ -38,7 +39,7 @@ impl CheckpointBuilder {
                     id.to_base64()
                 )));
             };
-            messages.push(projection::decode(
+            messages.push(messages::decode(
                 &data,
                 format!("cursor-root:{}:{ordinal}", id.to_base64()),
             )?);

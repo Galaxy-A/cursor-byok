@@ -1,8 +1,9 @@
+//! Encodes Tool execution requests sent to Cursor.
 use serde_json::{Map, Value};
 
 use crate::{
     cursor::{
-        proto::agent::v1 as pb,
+        protocol::proto::agent::v1 as pb,
         tools::{
             edit::{self, EditWrite},
             runtime::{ExecContext, McpRoute},
@@ -34,7 +35,7 @@ pub fn request(id: u32, call: &ToolCall, context: &ExecContext) -> Result<pb::Ag
             .map(|v| v as i32)
     };
     let message = match normalize(&call.name).as_str() {
-        "shell" => {
+        "shell" | "bash" => {
             let command = string("command")?;
             let (simple_commands, parsing_result) = shell_command_metadata(&command);
             Message::ShellStreamArgs(pb::ShellArgs {
@@ -188,32 +189,6 @@ pub(crate) fn edit_read_request(id: u32, call: &ToolCall) -> Result<pb::AgentSer
             ..Default::default()
         }),
         Some(true),
-    ))
-}
-
-pub(crate) fn await_read_request(
-    id: u32,
-    call: &ToolCall,
-    context: &ExecContext,
-) -> Result<pb::AgentServerMessage> {
-    let task_id = call
-        .arguments
-        .get("shell_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Protocol("AwaitShell is missing shell_id".into()))?;
-    Ok(server_message(
-        id,
-        call,
-        pb::exec_server_message::Message::ReadArgs(pb::ReadArgs {
-            path: format!(
-                "{}/{}.txt",
-                context.terminals_folder.trim_end_matches('/'),
-                task_id
-            ),
-            tool_call_id: call.call_id.clone(),
-            ..Default::default()
-        }),
-        Some(false),
     ))
 }
 
@@ -544,4 +519,39 @@ fn prost_value(value: &Value) -> prost_types::Value {
         }),
     };
     ProstValue { kind: Some(kind) }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::request;
+    use crate::cursor::protocol::proto::agent::v1 as pb;
+    use crate::cursor::tools::runtime::ExecContext;
+    use crate::model::ToolCall;
+
+    #[test]
+    fn bash_is_encoded_as_a_shell_exec_request() {
+        // The dispatcher routes `bash`/`Bash` to the shell executor, so the
+        // request codec must encode it as a Shell stream instead of erroring
+        // with `tool bash is not executed through ExecServerMessage`.
+        let call = ToolCall {
+            index: 0,
+            call_id: "call-1".into(),
+            model_call_id: "model-1".into(),
+            name: "Bash".into(),
+            arguments_text: String::new(),
+            arguments: json!({ "command": "ls -la" }),
+            argument_error: None,
+        };
+        let message = request(1, &call, &ExecContext::default()).unwrap();
+        let Some(pb::agent_server_message::Message::ExecServerMessage(exec)) = message.message
+        else {
+            panic!("expected an ExecServerMessage");
+        };
+        let Some(pb::exec_server_message::Message::ShellStreamArgs(args)) = exec.message else {
+            panic!("expected ShellStreamArgs");
+        };
+        assert_eq!(args.command, "ls -la");
+    }
 }

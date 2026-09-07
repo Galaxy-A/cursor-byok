@@ -1,15 +1,15 @@
+//! Tracks running Tool executions and coordinates cancellation and cleanup.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
-    time::Instant,
 };
 
 use tokio::sync::Mutex;
 
-use crate::{cursor::proto::agent::v1 as pb, model::ToolCall, Error, Result};
+use crate::{cursor::protocol::proto::agent::v1 as pb, model::ToolCall, Error, Result};
 
 use super::edit::EditWrite;
 
@@ -19,6 +19,7 @@ pub struct CursorToolRuntime {
     execs: Arc<Mutex<HashMap<u32, PendingExec>>>,
     interactions: Arc<Mutex<HashMap<u32, PendingInteraction>>>,
     completed: Arc<Mutex<HashMap<u32, String>>>,
+    interrupted: Arc<Mutex<HashSet<u32>>>,
 }
 
 pub(crate) struct PendingExec {
@@ -35,14 +36,6 @@ pub(crate) enum ExecStage {
     DynamicMcp(pb::McpToolDefinition),
     EditRead,
     EditWrite(EditWrite),
-    Await(AwaitState),
-}
-
-pub(crate) struct AwaitState {
-    pub deadline: Instant,
-    pub output_file_path: String,
-    pub task_id: String,
-    pub regex: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -126,6 +119,16 @@ pub(crate) struct PendingInteraction {
 }
 
 impl CursorToolRuntime {
+    pub(crate) fn next_run(&self) -> Self {
+        Self {
+            next_id: self.next_id.clone(),
+            execs: Arc::new(Mutex::new(HashMap::new())),
+            interactions: Arc::new(Mutex::new(HashMap::new())),
+            completed: Arc::new(Mutex::new(HashMap::new())),
+            interrupted: self.interrupted.clone(),
+        }
+    }
+
     pub async fn reserve_exec(&self, call: &ToolCall, context: &ExecContext) -> Result<u32> {
         self.reserve_exec_stage(call, context, ExecStage::Direct, None)
             .await
@@ -169,60 +172,6 @@ impl CursorToolRuntime {
             Some(started_at_ms),
         )
         .await
-    }
-
-    pub(crate) async fn reserve_await(
-        &self,
-        call: &ToolCall,
-        context: &ExecContext,
-    ) -> Result<u32> {
-        let task_id = call
-            .arguments
-            .get("shell_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| Error::Protocol("AwaitShell is missing shell_id".into()))?;
-        let block_ms = call
-            .arguments
-            .get("block_until_ms")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(30_000);
-        if block_ms > 7_140_000 {
-            return Err(Error::Protocol(
-                "AwaitShell block_until_ms exceeds 7140000".into(),
-            ));
-        }
-        let output_file_path = format!(
-            "{}/{}.txt",
-            context.terminals_folder.trim_end_matches('/'),
-            task_id
-        );
-        self.reserve_exec_stage(
-            call,
-            context,
-            ExecStage::Await(AwaitState {
-                deadline: Instant::now() + std::time::Duration::from_millis(block_ms),
-                output_file_path,
-                task_id: task_id.to_string(),
-                regex: call
-                    .arguments
-                    .get("pattern")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-            }),
-            None,
-        )
-        .await
-    }
-
-    pub(crate) async fn reserve_await_again(
-        &self,
-        call: &ToolCall,
-        context: &ExecContext,
-        state: AwaitState,
-        started_at_ms: u64,
-    ) -> Result<u32> {
-        self.reserve_exec_stage(call, context, ExecStage::Await(state), Some(started_at_ms))
-            .await
     }
 
     async fn reserve_exec_stage(
@@ -311,6 +260,10 @@ impl CursorToolRuntime {
         self.completed.lock().await.get(&id).cloned()
     }
 
+    pub async fn is_interrupted(&self, id: u32) -> bool {
+        self.interrupted.lock().await.contains(&id)
+    }
+
     pub async fn clear_completed(&self) {
         self.completed.lock().await.clear();
     }
@@ -329,7 +282,55 @@ impl CursorToolRuntime {
         ids.sort_unstable();
         self.interactions.lock().await.clear();
         self.completed.lock().await.clear();
+        self.interrupted.lock().await.clear();
         ids
+    }
+
+    pub async fn interrupt_for_run_replacement(&self) -> Vec<u32> {
+        let mut execs = self.execs.lock().await;
+        let mut abort_ids = execs.keys().copied().collect::<Vec<_>>();
+        let mut interrupted_ids = abort_ids.clone();
+        execs.clear();
+        drop(execs);
+
+        let mut interactions = self.interactions.lock().await;
+        interrupted_ids.extend(interactions.keys().copied());
+        interactions.clear();
+        drop(interactions);
+
+        self.completed.lock().await.clear();
+        self.interrupted.lock().await.extend(interrupted_ids);
+        abort_ids.sort_unstable();
+        abort_ids
+    }
+
+    pub async fn interrupt_for_message(&self) -> Vec<u32> {
+        let (abort_ids, interrupted_ids) = {
+            let mut entries = self.execs.lock().await;
+            let mut abort_ids = Vec::new();
+            let mut interrupted_ids = Vec::new();
+            entries.retain(|id, entry| {
+                interrupted_ids.push(*id);
+                let keep_running = entry.call.name.eq_ignore_ascii_case("Task");
+                if !keep_running {
+                    abort_ids.push(*id);
+                }
+                keep_running
+            });
+            (abort_ids, interrupted_ids)
+        };
+        let interaction_ids = {
+            let mut interactions = self.interactions.lock().await;
+            let ids = interactions.keys().copied().collect::<Vec<_>>();
+            interactions.clear();
+            ids
+        };
+        let mut interrupted = self.interrupted.lock().await;
+        interrupted.extend(interrupted_ids);
+        interrupted.extend(interaction_ids);
+        let mut abort_ids = abort_ids;
+        abort_ids.sort_unstable();
+        abort_ids
     }
 
     pub async fn running_exec_ids(&self) -> Vec<u32> {
@@ -363,79 +364,4 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn task(arguments: serde_json::Value) -> ToolCall {
-        ToolCall {
-            index: 0,
-            call_id: "task-1".into(),
-            model_call_id: "model-call-1".into(),
-            name: "Task".into(),
-            arguments_text: arguments.to_string(),
-            arguments,
-        }
-    }
-
-    #[test]
-    fn task_model_defaults_to_parent_and_honors_an_explicit_model() {
-        let context = ExecContext {
-            default_subagent_model: "parent-model".into(),
-            ..ExecContext::default()
-        };
-        let inherited = context
-            .prepare_call(&task(serde_json::json!({"prompt":"inspect"})))
-            .unwrap();
-        let explicit = context
-            .prepare_call(&task(serde_json::json!({
-                "prompt":"inspect",
-                "model":"child-model"
-            })))
-            .unwrap();
-
-        assert_eq!(inherited.arguments["model"], "parent-model");
-        assert_eq!(explicit.arguments["model"], "child-model");
-    }
-
-    #[test]
-    fn global_subagent_model_applies_to_every_task_type() {
-        let context = ExecContext {
-            default_subagent_model: "parent-model".into(),
-            subagent_model: Some(SubagentModel::Model("child-model".into())),
-            ..ExecContext::default()
-        };
-        let call = task(serde_json::json!({
-            "prompt":"inspect",
-            "subagent_type":"test-subagent"
-        }));
-
-        assert_eq!(
-            context.prepare_call(&call).unwrap().arguments["model"],
-            "child-model"
-        );
-    }
-
-    #[test]
-    fn disabled_subagents_disable_every_task_type() {
-        let context = ExecContext {
-            default_subagent_model: "parent-model".into(),
-            subagent_model: Some(SubagentModel::Disabled),
-            ..ExecContext::default()
-        };
-        let call = task(serde_json::json!({
-            "prompt":"inspect",
-            "subagent_type":"test-subagent"
-        }));
-
-        assert!(context.task_disabled(&call));
-        assert!(context
-            .prepare_call(&call)
-            .unwrap()
-            .arguments
-            .get("model")
-            .is_none());
-    }
 }

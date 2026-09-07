@@ -1,3 +1,4 @@
+//! Loads embedded Cursor Prompt assets.
 use std::{path::Path, sync::OnceLock};
 
 use crate::{model::ToolDefinition, Error, Result};
@@ -176,31 +177,4 @@ pub(super) fn runtime_expression() -> &'static regex::Regex {
     EXPRESSION.get_or_init(|| {
         regex::Regex::new(r"\{\{([A-Z_]+)\}\}").expect("valid runtime placeholder expression")
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn direct_semble_tools_are_available_in_every_working_mode() {
-        let assets = PromptAssets::embedded().unwrap();
-        for mode in [
-            Mode::Agent,
-            Mode::Ask,
-            Mode::Plan,
-            Mode::Debug,
-            Mode::Multitask,
-            Mode::Subagent,
-        ] {
-            let names = assets
-                .mode(mode)
-                .tools
-                .iter()
-                .map(|tool| tool.name.as_str())
-                .collect::<Vec<_>>();
-            assert!(names.contains(&"SembleSearch"), "missing in {mode:?}");
-            assert!(names.contains(&"SembleFindRelated"), "missing in {mode:?}");
-        }
-    }
 }

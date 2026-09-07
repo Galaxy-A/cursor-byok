@@ -1,3 +1,4 @@
+//! Persists canonical Messages and enforces event idempotency.
 use sqlx::{Row, Sqlite, Transaction};
 
 use crate::{
@@ -73,27 +74,27 @@ impl Store {
         }
     }
 
-    pub(crate) async fn load_revision_messages_tx(
+    pub(crate) async fn load_checkpoint_messages_tx(
         tx: &mut Transaction<'_, Sqlite>,
-        revision_id: i64,
+        checkpoint_id: i64,
     ) -> Result<Vec<CanonicalMessage>> {
         let rows = sqlx::query(
-            "WITH RECURSIVE lineage(revision_id, parent_revision_id, depth) AS (
-                 SELECT revision_id, parent_revision_id, 0
-                 FROM conversation_revisions WHERE revision_id = ?
+            "WITH RECURSIVE lineage(checkpoint_id, parent_checkpoint_id, depth) AS (
+                 SELECT checkpoint_id, parent_checkpoint_id, 0
+                 FROM conversation_checkpoints WHERE checkpoint_id = ?
                  UNION ALL
-                 SELECT r.revision_id, r.parent_revision_id, lineage.depth + 1
-                 FROM conversation_revisions r
-                 JOIN lineage ON r.revision_id = lineage.parent_revision_id
+                 SELECT r.checkpoint_id, r.parent_checkpoint_id, lineage.depth + 1
+                 FROM conversation_checkpoints r
+                 JOIN lineage ON r.checkpoint_id = lineage.parent_checkpoint_id
              )
              SELECT m.payload_json
              FROM lineage
-             JOIN revision_messages rm ON rm.revision_id = lineage.revision_id
+             JOIN checkpoint_messages rm ON rm.checkpoint_id = lineage.checkpoint_id
              JOIN messages m
                ON m.conversation_id = rm.conversation_id AND m.message_id = rm.message_id
              ORDER BY lineage.depth DESC, rm.ordinal ASC",
         )
-        .bind(revision_id)
+        .bind(checkpoint_id)
         .fetch_all(&mut **tx)
         .await?;
         rows.into_iter()

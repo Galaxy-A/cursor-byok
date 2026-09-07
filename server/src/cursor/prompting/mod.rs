@@ -1,3 +1,5 @@
+//! Exposes Cursor Prompt compilation.
+
 mod assets;
 mod catalog;
 mod compiler;

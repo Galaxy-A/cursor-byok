@@ -1,3 +1,4 @@
+//! Implements model configuration endpoints.
 use axum::{
     extract::{Path, State},
     http::StatusCode,

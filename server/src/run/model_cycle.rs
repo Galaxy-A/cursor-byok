@@ -1,3 +1,4 @@
+//! Executes and consumes one streaming provider call.
 use std::{collections::btree_map::Entry, collections::BTreeMap, time::Instant};
 
 use futures_util::StreamExt;
@@ -5,12 +6,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    client::ClientEvent,
-    model::{ProviderReplayState, ToolCall, Usage},
+    model::{normalize_tool_name, ProviderReplayState, ToolCall, Usage},
     provider::{FinishReason, ModelEvent, ProviderStream},
 };
 
-use super::RunFailure;
+use super::{RunEvent, RunFailure};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelCycleResult {
@@ -29,6 +29,7 @@ pub struct ModelCycleFailure {
     pub partial_text: String,
     pub partial_reasoning: String,
     pub usage: Option<Usage>,
+    pub retryable: bool,
 }
 
 struct OpenTool {
@@ -38,9 +39,9 @@ struct OpenTool {
 
 pub async fn consume_model_cycle(
     mut stream: ProviderStream,
-    client: &mpsc::Sender<ClientEvent>,
+    client: &mpsc::Sender<RunEvent>,
     cancellation: &CancellationToken,
-) -> std::result::Result<ModelCycleResult, ModelCycleFailure> {
+) -> std::result::Result<ModelCycleResult, Box<ModelCycleFailure>> {
     let mut model_call_id = None;
     let mut text = String::new();
     let mut reasoning = String::new();
@@ -60,39 +61,18 @@ pub async fn consume_model_cycle(
             biased;
             next = stream.next() => next,
             _ = cancellation.cancelled() => {
-                // An injected runtime message cancels only this provider cycle. Close any
-                // presentation blocks that were opened by the old cycle before the engine
-                // starts the replacement cycle, otherwise Cursor appends the new deltas to
-                // the old Thinking/Text block and makes it look as if cancellation failed.
-                if text_open {
-                    let _ = send(client, ClientEvent::TextEnd).await;
-                }
-                if let Some(started) = thinking_started.take() {
-                    let _ = send(
-                        client,
-                        ClientEvent::ThinkingEnd {
-                            duration: started.elapsed(),
-                        },
-                    )
-                    .await;
-                }
-                return Err(failure(RunFailure::Client("run was cancelled".into()), text, reasoning, usage));
+                interrupt_cycle(client, text_open, thinking_started.take()).await;
+                return Err(failure(
+                    RunFailure::Client("run was cancelled".into()),
+                    text,
+                    reasoning,
+                    usage,
+                ));
             }
         };
         let Some(next) = next else {
             if cancellation.is_cancelled() {
-                if text_open {
-                    let _ = send(client, ClientEvent::TextEnd).await;
-                }
-                if let Some(started) = thinking_started.take() {
-                    let _ = send(
-                        client,
-                        ClientEvent::ThinkingEnd {
-                            duration: started.elapsed(),
-                        },
-                    )
-                    .await;
-                }
+                interrupt_cycle(client, text_open, thinking_started.take()).await;
                 return Err(failure(
                     RunFailure::Client("run was cancelled".into()),
                     text,
@@ -131,7 +111,7 @@ pub async fn consume_model_cycle(
                     Err("provider emitted duplicate TextStart")
                 } else {
                     text_open = true;
-                    send(client, ClientEvent::TextStart).await
+                    send(client, RunEvent::TextStart).await
                 }
             }
             ModelEvent::TextDelta(delta) => {
@@ -139,7 +119,7 @@ pub async fn consume_model_cycle(
                     Err("provider emitted TextDelta before TextStart")
                 } else {
                     text.push_str(&delta);
-                    send(client, ClientEvent::TextDelta(delta)).await
+                    send(client, RunEvent::TextDelta(delta)).await
                 }
             }
             ModelEvent::TextEnd => {
@@ -147,7 +127,7 @@ pub async fn consume_model_cycle(
                     Err("provider emitted TextEnd before TextStart")
                 } else {
                     text_open = false;
-                    send(client, ClientEvent::TextEnd).await
+                    send(client, RunEvent::TextEnd).await
                 }
             }
             ModelEvent::ThinkingStart => {
@@ -156,7 +136,7 @@ pub async fn consume_model_cycle(
                 } else if thinking_started.replace(Instant::now()).is_some() {
                     Err("provider emitted duplicate ThinkingStart")
                 } else {
-                    send(client, ClientEvent::ThinkingStart).await
+                    send(client, RunEvent::ThinkingStart).await
                 }
             }
             ModelEvent::ThinkingDelta(delta) => {
@@ -164,14 +144,14 @@ pub async fn consume_model_cycle(
                     Err("provider emitted ThinkingDelta before ThinkingStart")
                 } else {
                     reasoning.push_str(&delta);
-                    send(client, ClientEvent::ThinkingDelta(delta)).await
+                    send(client, RunEvent::ThinkingDelta(delta)).await
                 }
             }
             ModelEvent::ThinkingEnd => {
                 if let Some(started) = thinking_started.take() {
                     send(
                         client,
-                        ClientEvent::ThinkingEnd {
+                        RunEvent::ThinkingEnd {
                             duration: started.elapsed(),
                         },
                     )
@@ -185,6 +165,7 @@ pub async fn consume_model_cycle(
                 call_id,
                 name,
             } => {
+                let name = normalize_tool_name(&name);
                 let Some(model_call_id) = model_call_id.as_ref() else {
                     return Err(failure(
                         RunFailure::Protocol("provider emitted content before Start".into()),
@@ -207,12 +188,13 @@ pub async fn consume_model_cycle(
                                 name: name.clone(),
                                 arguments_text: String::new(),
                                 arguments: serde_json::Value::Null,
+                                argument_error: None,
                             },
                             ended: false,
                         });
                         send(
                             client,
-                            ClientEvent::ToolCallStart {
+                            RunEvent::ToolCallStart {
                                 index,
                                 call_id,
                                 name,
@@ -226,7 +208,7 @@ pub async fn consume_model_cycle(
             ModelEvent::ToolCallArgumentsDelta { index, delta } => match tools.get_mut(&index) {
                 Some(tool) if !tool.ended => {
                     tool.call.arguments_text.push_str(&delta);
-                    send(client, ClientEvent::ToolCallArgumentsDelta { index, delta }).await
+                    send(client, RunEvent::ToolCallArgumentsDelta { index, delta }).await
                 }
                 Some(_) => Err("provider emitted tool arguments after ToolCallEnd"),
                 None => Err("provider emitted tool arguments for an unknown index"),
@@ -239,13 +221,26 @@ pub async fn consume_model_cycle(
                         serde_json::from_str(&tool.call.arguments_text)
                     };
                     match arguments {
-                        Ok(arguments) => {
+                        Ok(arguments) if arguments.is_object() => {
                             tool.call.arguments = arguments;
-                            tool.ended = true;
-                            send(client, ClientEvent::ToolCallEnd { index }).await
                         }
-                        Err(_) => Err("provider ended a tool call with invalid JSON arguments"),
+                        Ok(_) => {
+                            tool.call.arguments = serde_json::json!({});
+                            tool.call.argument_error = Some(format!(
+                                "{} arguments must be a JSON object",
+                                tool.call.name
+                            ));
+                        }
+                        Err(error) => {
+                            tool.call.arguments = serde_json::json!({});
+                            tool.call.argument_error = Some(format!(
+                                "{} arguments are not valid JSON: {error}",
+                                tool.call.name
+                            ));
+                        }
                     }
+                    tool.ended = true;
+                    send(client, RunEvent::ToolCallEnd { index }).await
                 }
                 Some(_) => Err("provider emitted duplicate ToolCallEnd"),
                 None => Err("provider ended an unknown tool index"),
@@ -260,6 +255,13 @@ pub async fn consume_model_cycle(
             ModelEvent::Usage(value) => {
                 if usage.replace(value).is_some() {
                     Err("provider emitted duplicate Usage")
+                } else if send(client, RunEvent::Usage(value)).await.is_err() {
+                    return Err(failure(
+                        RunFailure::Client("client event channel closed".into()),
+                        text,
+                        reasoning,
+                        usage,
+                    ));
                 } else {
                     Ok(())
                 }
@@ -301,7 +303,7 @@ pub async fn consume_model_cycle(
         .map(|tool| tool.call)
         .collect::<Vec<_>>();
     if finish_reason == FinishReason::Length {
-        return Err(failure(
+        return Err(terminal_failure(
             RunFailure::Provider("model stopped before completing the response".into()),
             text,
             reasoning,
@@ -316,16 +318,6 @@ pub async fn consume_model_cycle(
             reasoning,
             usage,
         ));
-    }
-    if let Some(usage) = usage {
-        if send(client, ClientEvent::Usage(usage)).await.is_err() {
-            return Err(failure(
-                RunFailure::Client("client event channel closed".into()),
-                text,
-                reasoning,
-                Some(usage),
-            ));
-        }
     }
     let model_call_id = model_call_id.ok_or_else(|| {
         failure(
@@ -347,8 +339,8 @@ pub async fn consume_model_cycle(
 }
 
 async fn send(
-    client: &mpsc::Sender<ClientEvent>,
-    event: ClientEvent,
+    client: &mpsc::Sender<RunEvent>,
+    event: RunEvent,
 ) -> std::result::Result<(), &'static str> {
     client
         .send(event)
@@ -356,16 +348,136 @@ async fn send(
         .map_err(|_| "client event channel closed")
 }
 
+async fn interrupt_cycle(
+    client: &mpsc::Sender<RunEvent>,
+    text_open: bool,
+    thinking_started: Option<Instant>,
+) {
+    if text_open {
+        let _ = send(client, RunEvent::TextEnd).await;
+    }
+    if let Some(started) = thinking_started {
+        let _ = send(
+            client,
+            RunEvent::ThinkingEnd {
+                duration: started.elapsed(),
+            },
+        )
+        .await;
+    }
+}
+
 fn failure(
     failure: RunFailure,
     partial_text: String,
     partial_reasoning: String,
     usage: Option<Usage>,
-) -> ModelCycleFailure {
-    ModelCycleFailure {
+) -> Box<ModelCycleFailure> {
+    let retryable = matches!(failure, RunFailure::Protocol(_) | RunFailure::Provider(_));
+    Box::new(ModelCycleFailure {
         failure,
         partial_text,
         partial_reasoning,
         usage,
+        retryable,
+    })
+}
+
+fn terminal_failure(
+    failure: RunFailure,
+    partial_text: String,
+    partial_reasoning: String,
+    usage: Option<Usage>,
+) -> Box<ModelCycleFailure> {
+    Box::new(ModelCycleFailure {
+        failure,
+        partial_text,
+        partial_reasoning,
+        usage,
+        retryable: false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::Usage,
+        provider::{FinishReason, ModelEvent},
+    };
+    use tokio_stream::wrappers::ReceiverStream;
+
+    #[tokio::test]
+    async fn provider_tool_names_are_normalized_when_received() {
+        let events = vec![
+            Ok(ModelEvent::Start {
+                model_call_id: "call".into(),
+            }),
+            Ok(ModelEvent::ToolCallStart {
+                index: 0,
+                call_id: "tool-call".into(),
+                name: "multi_tool_use.parallel".into(),
+            }),
+            Ok(ModelEvent::ToolCallEnd { index: 0 }),
+            Ok(ModelEvent::Done(FinishReason::ToolUse)),
+        ];
+        let stream = Box::pin(tokio_stream::iter(events));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+
+        let result = consume_model_cycle(stream, &event_tx, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.calls[0].name, "multi_tool_use_parallel");
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(RunEvent::ToolCallStart { name, .. }) if name == "multi_tool_use_parallel"
+        ));
+    }
+
+    #[tokio::test]
+    async fn usage_is_forwarded_before_the_provider_call_finishes() {
+        let (provider_tx, provider_rx) = tokio::sync::mpsc::channel(4);
+        let stream = Box::pin(ReceiverStream::new(provider_rx));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let cancellation = CancellationToken::new();
+        let cycle_cancellation = cancellation.clone();
+        let cycle = tokio::spawn(async move {
+            consume_model_cycle(stream, &event_tx, &cycle_cancellation).await
+        });
+        let usage = Usage {
+            input_tokens: Some(100),
+            context_input_tokens: Some(100),
+            output_tokens: Some(20),
+            total_tokens: Some(120),
+            ..Default::default()
+        };
+
+        provider_tx
+            .send(Ok(ModelEvent::Start {
+                model_call_id: "call".into(),
+            }))
+            .await
+            .unwrap();
+        provider_tx
+            .send(Ok(ModelEvent::Usage(usage)))
+            .await
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, RunEvent::Usage(value) if value == usage));
+        assert!(!cycle.is_finished(), "usage must arrive before Done");
+
+        provider_tx
+            .send(Ok(ModelEvent::Done(FinishReason::Stop)))
+            .await
+            .unwrap();
+        drop(provider_tx);
+        let result = cycle.await.unwrap().unwrap();
+        assert_eq!(result.usage, Some(usage));
+        assert!(event_rx.try_recv().is_err(), "usage must be forwarded once");
     }
 }

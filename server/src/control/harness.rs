@@ -1,7 +1,8 @@
+//! Implements local application control endpoints.
 use axum::{extract::State, Json};
 
 use crate::{
-    harness::{CursorHarnessStatus, SetEnabled},
+    local_app::{CursorHarnessStatus, SetEnabled},
     Result,
 };
 

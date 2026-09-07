@@ -1,3 +1,4 @@
+//! Provides isolated stores and canonical message fixtures for tests.
 #![allow(dead_code)]
 
 use cursor_server::{

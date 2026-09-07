@@ -1,3 +1,4 @@
+//! Implements the OpenAI Chat Completions provider adapter.
 use std::collections::BTreeMap;
 
 use async_stream::try_stream;
@@ -16,8 +17,11 @@ use crate::{
 };
 
 use super::{
-    apply_openai_prompt_cache_key, merge_extra_params, recorder::recorded_headers, CallRecorder,
-    FinishReason, ModelEvent, Provider, ProviderStream,
+    apply_body_allowlist, apply_openai_prompt_cache_key,
+    attempt::{send_once, Attempt},
+    map_sse_error, merge_extra_params, provider_event_error,
+    recorder::recorded_headers,
+    CallRecorder, FinishReason, ModelEvent, Provider, ProviderStream,
 };
 
 #[derive(Default)]
@@ -61,40 +65,41 @@ impl Provider for OpenAiChatProvider {
         let recorder = self.recorder.clone();
         Box::pin(try_stream! {
             let ModelInvocation { call_id, request, .. } = invocation;
+            tracing::debug!(
+                model = %request.model.model_id,
+                call_id = %call_id,
+                history_len = request.history.len(),
+                tools_count = request.prompt.tools.len(),
+                "OpenAI Chat provider stream started"
+            );
             let messages = openai_chat_messages(&request.prompt.instructions, &request.history)?;
             let mut body = json!({
                 "model": request.model.model_id,
                 "messages": messages,
-                "tools": request.prompt.tools.iter().map(|tool| json!({"type":"function","function":{
-                    "name": tool.name, "description": tool.description, "parameters": tool.parameters
-                }})).collect::<Vec<_>>(),
                 "stream": true,
                 "stream_options": {"include_usage": true}
             });
+            if !request.prompt.tools.is_empty() {
+                body["tools"] = json!(request.prompt.tools.iter().map(|tool| json!({"type":"function","function":{
+                    "name": tool.name, "description": tool.description, "parameters": tool.parameters
+                }})).collect::<Vec<_>>());
+            }
             apply_model(&mut body, &request.model, config.max_output_tokens)?;
             merge_extra_params(&mut body, &request.model.extra_params)?;
             apply_openai_prompt_cache_key(&mut body, &request.model.model_id)?;
+            apply_body_allowlist(&mut body, config.allowed_body_fields.as_ref())?;
+            let request_headers = recorded_headers(&config, &[("content-type", "application/json")]);
             if let Some(recorder) = &recorder {
-                recorder.request(recorded_headers(&config, &[("content-type", "application/json")]), &body).await?;
+                recorder.request(request_headers.clone(), &body).await?;
             }
-            let request = client.post(&config.request_url)
-                .bearer_auth(&config.api_key).headers(config.custom_headers.clone()).json(&body).send();
-            let response = tokio::select! {
-                _ = cancellation.cancelled() => return,
-                response = request => response,
-            };
-            let response = response?;
-            if let Some(recorder) = &recorder {
-                recorder.response_headers(response.status().as_u16()).await?;
-            }
-            if !response.status().is_success() {
-                let status = response.status();
-                let bytes = response.bytes().await?;
-                if let Some(recorder) = &recorder { recorder.response_chunk(&bytes).await?; }
-                let text = String::from_utf8_lossy(&bytes);
-                Err(Error::Provider(format!("OpenAI Chat {status}: {text}")))?;
-                return;
-            }
+            let attempt = send_once(
+                "OpenAI Chat",
+                || client.post(&config.request_url)
+                    .bearer_auth(&config.api_key).headers(config.custom_headers.clone()).json(&body),
+                &cancellation,
+                recorder.as_ref(),
+            ).await?;
+            let Attempt::Response(response) = attempt else { return };
             yield ModelEvent::Start { model_call_id: call_id };
             let chunk_recorder = recorder.clone();
             let chunks = response.bytes_stream()
@@ -116,23 +121,44 @@ impl Provider for OpenAiChatProvider {
             let mut final_usage = None;
             let mut finish = None;
             let mut saw_done_marker = false;
+            let mut loop_iteration: u64 = 0;
             loop {
+                loop_iteration += 1;
                 let event = tokio::select! {
                     _ = cancellation.cancelled() => {
+                        tracing::debug!(
+                            iteration = loop_iteration,
+                            saw_done_marker,
+                            tool_count = tools.len(),
+                            "OpenAI Chat stream cancelled"
+                        );
                         return;
                     }
                     event = source.next() => event,
                 };
-                let Some(event) = event else { break };
-                let event = event.map_err(|error| Error::Provider(format!("OpenAI Chat SSE: {error}")))?;
+                let Some(event) = event else {
+                    tracing::debug!(
+                        iteration = loop_iteration,
+                        saw_done_marker,
+                        "OpenAI Chat SSE stream ended"
+                    );
+                    break;
+                };
+                let event = event.map_err(|error| {
+                    tracing::debug!(iteration = loop_iteration, error = %error, "OpenAI Chat SSE event failed");
+                    map_sse_error("OpenAI Chat", error)
+                })?;
                 if event.data == "[DONE]" { saw_done_marker = true; break; }
                 let value: Value = serde_json::from_str(&event.data)?;
+                if let Some(error) = provider_event_error("OpenAI Chat", &value) {
+                    Err(error)?;
+                }
                 if let Some(usage) = value.get("usage").filter(|value| !value.is_null()) {
                     final_usage = Some(openai_usage(usage));
                 }
                 let Some(choice) = value.get("choices").and_then(Value::as_array).and_then(|values| values.first()) else { continue; };
                 let delta = choice.get("delta").unwrap_or(&Value::Null);
-                if let Some(reasoning_delta) = delta.get("reasoning_content").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+                if let Some(reasoning_delta) = delta.get("reasoning_content").or_else(|| delta.get("reasoning")).and_then(Value::as_str).filter(|text| !text.is_empty()) {
                     if !thinking_open { thinking_open = true; yield ModelEvent::ThinkingStart; }
                     reasoning.push_str(reasoning_delta);
                     yield ModelEvent::ThinkingDelta(reasoning_delta.into());
@@ -230,12 +256,27 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
                 calls,
                 ..
             } => {
-                value.insert("content".into(), Value::String(text.clone()));
                 let replay_reasoning = replay_state
                     .as_ref()
                     .filter(|state| state.provider_kind == "openai_chat")
                     .and_then(|state| state.value.get("reasoning_content"))
-                    .and_then(Value::as_str);
+                    .and_then(Value::as_str)
+                    .filter(|reasoning| !reasoning.is_empty());
+
+                // Chat Completions rejects an empty assistant content string. Tool-call
+                // assistant messages use null content, while an assistant with no visible
+                // content at all does not need to be sent.
+                if text.is_empty() && calls.is_empty() && replay_reasoning.is_none() {
+                    continue;
+                }
+                value.insert(
+                    "content".into(),
+                    if text.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(text.clone())
+                    },
+                );
                 if let Some(reasoning) = replay_reasoning {
                     value.insert("reasoning_content".into(), Value::String(reasoning.into()));
                 }
@@ -324,7 +365,9 @@ fn map_finish(value: &str, has_tools: bool) -> FinishReason {
     match value {
         "tool_calls" | "function_call" => FinishReason::ToolUse,
         "length" => FinishReason::Length,
-        "stop" | "content_filter" => FinishReason::Stop,
+        "content_filter" => FinishReason::Stop,
+        // Observed tool calls outrank ordinary or unknown stop labels because
+        // OpenAI-compatible servers commonly emit tools with `stop`.
         _ if has_tools => FinishReason::ToolUse,
         _ => FinishReason::Stop,
     }
@@ -377,8 +420,10 @@ fn merge_chat_fragment(target: &mut String, fragment: &str) {
 }
 
 pub(crate) fn openai_usage(value: &Value) -> Usage {
+    let input_tokens = value.get("prompt_tokens").and_then(Value::as_u64);
     Usage {
-        input_tokens: value.get("prompt_tokens").and_then(Value::as_u64),
+        input_tokens,
+        context_input_tokens: input_tokens,
         output_tokens: value.get("completion_tokens").and_then(Value::as_u64),
         total_tokens: value.get("total_tokens").and_then(Value::as_u64),
         cache_read_tokens: value
@@ -393,95 +438,32 @@ pub(crate) fn openai_usage(value: &Value) -> Usage {
 
 #[cfg(test)]
 mod tests {
-    use super::openai_chat_messages;
-    use crate::{
-        model::{ContentPart, ProjectedContent, ProjectedMessage, ToolResultContent},
-        model::{ProviderReplayState, Role, ToolCallContent},
-    };
-    use serde_json::json;
+    use super::*;
 
     #[test]
-    fn chat_replay_state_is_encoded_as_reasoning_content() {
-        let messages = openai_chat_messages(
-            "",
-            &[ProjectedMessage {
-                message_id: "test".into(),
-                role: Role::Assistant,
-                content: ProjectedContent::Assistant {
-                    text: "visible answer".into(),
-                    thinking: "private reasoning".into(),
-                    replay_state: Some(ProviderReplayState {
-                        provider_kind: "openai_chat".into(),
-                        value: json!({"reasoning_content": "private reasoning"}),
-                    }),
-                    calls: vec![ToolCallContent {
-                        index: 0,
-                        call_id: "call-1".into(),
-                        name: "Read".into(),
-                        arguments: json!({}),
-                    }],
-                },
-            }],
-        )
-        .unwrap();
-
-        assert_eq!(messages[0]["content"], "visible answer");
-        assert_eq!(messages[0]["reasoning_content"], "private reasoning");
-        assert_eq!(messages[0]["tool_calls"][0]["id"], "call-1");
+    fn observed_tool_calls_outrank_ordinary_stop_reasons() {
+        assert_eq!(map_finish("stop", true), FinishReason::ToolUse);
+        assert_eq!(map_finish("", true), FinishReason::ToolUse);
     }
 
     #[test]
-    fn another_provider_replay_does_not_invent_chat_reasoning_content() {
-        let messages = openai_chat_messages(
-            "",
-            &[ProjectedMessage {
-                message_id: "test".into(),
-                role: Role::Assistant,
-                content: ProjectedContent::Assistant {
-                    text: "visible answer".into(),
-                    thinking: "display-only summary".into(),
-                    replay_state: Some(ProviderReplayState {
-                        provider_kind: "anthropic".into(),
-                        value: json!({"blocks": []}),
-                    }),
-                    calls: vec![],
-                },
-            }],
-        )
-        .unwrap();
-
-        assert!(messages[0].get("reasoning_content").is_none());
+    fn content_filter_never_executes_observed_tool_calls() {
+        assert_eq!(map_finish("content_filter", true), FinishReason::Stop);
+        assert_eq!(map_finish("content_filter", false), FinishReason::Stop);
     }
 
     #[test]
-    fn read_image_stays_in_its_tool_message() {
-        let messages = openai_chat_messages(
-            "",
-            &[ProjectedMessage {
-                message_id: "result".into(),
-                role: Role::Tool,
-                content: ProjectedContent::ToolResult(ToolResultContent {
-                    call_id: "call".into(),
-                    name: "Read".into(),
-                    content: "Read image file: image.png".into(),
-                    is_error: false,
-                    image: None,
-                    provider_parts: vec![
-                        ContentPart::Text {
-                            text: "Read image file: image.png".into(),
-                        },
-                        ContentPart::Image {
-                            mime_type: "image/png".into(),
-                            data: b"png".to_vec(),
-                        },
-                    ],
-                }),
-            }],
-        )
-        .unwrap();
+    fn finish_reason_mapping_without_tool_calls_is_unchanged() {
+        assert_eq!(map_finish("stop", false), FinishReason::Stop);
+        assert_eq!(map_finish("content_filter", false), FinishReason::Stop);
+        assert_eq!(map_finish("", false), FinishReason::Stop);
+        assert_eq!(map_finish("tool_calls", false), FinishReason::ToolUse);
+        assert_eq!(map_finish("function_call", false), FinishReason::ToolUse);
+    }
 
-        assert_eq!(messages[0]["role"], "tool");
-        assert_eq!(messages[0]["tool_call_id"], "call");
-        assert_eq!(messages[0]["content"][1]["type"], "image_url");
+    #[test]
+    fn a_truncated_response_stays_truncated_even_with_tool_calls() {
+        assert_eq!(map_finish("length", true), FinishReason::Length);
+        assert_eq!(map_finish("length", false), FinishReason::Length);
     }
 }

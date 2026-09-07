@@ -1,3 +1,4 @@
+//! Defines the server-wide error type and error conversions.
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -24,6 +25,10 @@ pub enum Error {
     Database(#[from] sqlx::Error),
     #[error("database migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error(
+        "database migration stage '{stage}' timed out after {timeout_seconds} seconds; close other Cursor BYOK processes and try again"
+    )]
+    MigrationTimeout { stage: String, timeout_seconds: u64 },
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("protobuf decode error: {0}")]
@@ -48,9 +53,12 @@ impl IntoResponse for Error {
             Self::Store(_)
             | Self::Database(_)
             | Self::Migration(_)
+            | Self::MigrationTimeout { .. }
             | Self::Encode(_)
             | Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        // 所有回给 UI 的错误统一落日志,否则失败原因只出现在前端提示里。
+        tracing::warn!(%status, error = %self, "request failed");
         let code = match status {
             StatusCode::BAD_REQUEST => "invalid_argument",
             StatusCode::NOT_FOUND => "not_found",

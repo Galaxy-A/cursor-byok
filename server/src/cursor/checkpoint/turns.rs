@@ -1,7 +1,8 @@
+//! Projects buffered steps into Cursor Conversation turns.
 use prost::Message;
 
 use crate::{
-    cursor::{presentation::PresentationDelta, proto::agent::v1 as pb},
+    cursor::{checkpoint::PendingSteps, protocol::proto::agent::v1 as pb},
     store::{BlobEdge, BlobId},
     Error, Result,
 };
@@ -19,7 +20,7 @@ impl CheckpointBuilder {
     pub(super) async fn project_turns(
         &mut self,
         mode: i32,
-        presentation: &PresentationDelta,
+        presentation: &PendingSteps,
     ) -> Result<Vec<BlobId>> {
         self.ensure_turn(mode).await?;
         let Some(turn) = self.turn.as_mut() else {

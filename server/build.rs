@@ -1,8 +1,9 @@
+//! Generates Cursor protobuf bindings and validates captured wire contracts.
 use std::{env, path::PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let proto_dir = manifest.join("../scripts/cursor-proto/proto");
+    let proto_dir = manifest.join("../protocols/cursor");
     let protos = [proto_dir.join("agent_v1.proto")];
     let aiserver_proto = proto_dir.join("aiserver_v1.proto");
 

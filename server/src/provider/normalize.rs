@@ -1,3 +1,4 @@
+//! Normalizes provider-specific responses.
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;

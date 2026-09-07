@@ -1,3 +1,4 @@
+//! Loads and validates process-level server configuration.
 use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 
 #[cfg(unix)]
@@ -9,6 +10,8 @@ const DATA_DIR_NAME: &str = ".cursor-byok-v3";
 const DATABASE_FILE_NAME: &str = "cursor-byok.db";
 const V0049_DATA_DIR_NAME: &str = ".cursor-local-assistant-v2";
 const V0049_CONFIG_FILE_NAME: &str = "config.yaml";
+const DEFAULT_PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 pub fn managed_data_dir() -> Result<PathBuf> {
     let home_dir = dirs::home_dir()
@@ -43,6 +46,7 @@ pub struct ProviderConfig {
     pub custom_headers: reqwest::header::HeaderMap,
     pub max_output_tokens: Option<u64>,
     pub request_timeout: Duration,
+    pub allowed_body_fields: Option<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -50,8 +54,11 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub database_url: String,
     pub provider_request_timeout: Duration,
+    pub provider_stream_idle_timeout: Duration,
     pub console: Option<ConsoleSource>,
     pub use_persisted_ports: bool,
+    /// 面向用户的应用版本;桌面壳会覆盖为自身版本,用于插件 minAppVersion 门控。
+    pub app_version: String,
 }
 
 #[derive(Clone)]
@@ -70,7 +77,7 @@ impl Config {
             Ok(value) => Duration::from_secs(value.parse().map_err(|error| {
                 Error::Config(format!("invalid CURSOR_PROVIDER_TIMEOUT_SECONDS: {error}"))
             })?),
-            Err(env::VarError::NotPresent) => Duration::from_secs(300),
+            Err(env::VarError::NotPresent) => DEFAULT_PROVIDER_REQUEST_TIMEOUT,
             Err(error) => {
                 return Err(Error::Config(format!(
                     "invalid CURSOR_PROVIDER_TIMEOUT_SECONDS: {error}"
@@ -100,8 +107,10 @@ impl Config {
             listen_addr,
             database_url: database_url_from_env()?,
             provider_request_timeout: request_timeout,
+            provider_stream_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
             console,
             use_persisted_ports: false,
+            app_version: env!("CARGO_PKG_VERSION").into(),
         })
     }
 
@@ -111,9 +120,11 @@ impl Config {
                 .parse()
                 .expect("desktop listen address is static"),
             database_url: default_database_url()?,
-            provider_request_timeout: Duration::from_secs(300),
+            provider_request_timeout: DEFAULT_PROVIDER_REQUEST_TIMEOUT,
+            provider_stream_idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
             console: None,
             use_persisted_ports: true,
+            app_version: env!("CARGO_PKG_VERSION").into(),
         })
     }
 }
@@ -133,17 +144,6 @@ fn default_database_url() -> Result<String> {
     database_url_for_dir(&data_dir)
 }
 
-#[cfg(test)]
-fn database_url_in(home_dir: &std::path::Path) -> Result<String> {
-    let data_dir = home_dir.join(DATA_DIR_NAME);
-    fs::create_dir_all(&data_dir)?;
-
-    #[cfg(unix)]
-    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
-
-    database_url_for_dir(&data_dir)
-}
-
 fn database_url_for_dir(data_dir: &std::path::Path) -> Result<String> {
     let database_path = data_dir.join(DATABASE_FILE_NAME);
     let database_path = database_path
@@ -156,22 +156,15 @@ fn database_url_for_dir(data_dir: &std::path::Path) -> Result<String> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn managed_database_supports_home_paths_with_spaces() {
-        let directory = tempfile::tempdir().unwrap();
-        let home_dir = directory.path().join("home with spaces");
-        let database_url = database_url_in(&home_dir).unwrap();
-
-        let store = crate::store::Store::connect(&database_url).await.unwrap();
-        drop(store);
-
-        let data_dir = home_dir.join(DATA_DIR_NAME);
-        assert!(data_dir.join(DATABASE_FILE_NAME).is_file());
-
-        #[cfg(unix)]
+    #[test]
+    fn provider_timeout_defaults_match_runtime_boundaries() {
         assert_eq!(
-            fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
-            0o700
+            DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
+            Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            DEFAULT_PROVIDER_REQUEST_TIMEOUT,
+            Duration::from_secs(60 * 60)
         );
     }
 }

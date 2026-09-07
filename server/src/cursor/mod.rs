@@ -1,31 +1,13 @@
-mod account;
-mod actor;
-mod analytics;
-pub mod bidi_append;
-pub mod blob_sync;
-pub mod checkpoint;
-pub mod connect;
-mod context_sync;
-pub mod handlers;
-mod inbox;
-pub mod interaction;
-mod json_stream;
-pub(crate) mod lifecycle;
-mod model_catalog;
-pub(crate) mod observability;
-mod presentation;
-mod projection;
-pub mod prompting;
-pub mod proto;
-pub mod proxy;
-pub mod request;
-pub mod run_sse;
-pub mod session;
-pub mod sessions;
-pub(crate) mod tab;
-pub mod tools;
-mod usage;
+//! Exposes the Cursor protocol adapter and its conversation runtime.
 
-pub use command::CursorCommand;
-pub use sessions::{CursorParent, CursorSessionHandle, CursorSessionRegistry};
-mod command;
+pub mod checkpoint;
+pub mod compile;
+pub mod conversation;
+pub mod prompting;
+pub mod protocol;
+pub mod services;
+pub mod tools;
+pub mod transport;
+
+pub use conversation::TransportCommand;
+pub use transport::{TransportHandle, TransportParent, TransportRegistry, TransportRoute};

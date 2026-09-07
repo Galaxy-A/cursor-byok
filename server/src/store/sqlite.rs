@@ -1,3 +1,4 @@
+//! Initializes and configures SQLite storage.
 use std::{str::FromStr, time::Duration};
 
 use sqlx::{
@@ -7,7 +8,7 @@ use sqlx::{
 
 use crate::Result;
 
-use super::writer::WriteCoordinator;
+use super::{migrations, writer::WriteCoordinator};
 
 #[derive(Clone)]
 pub struct Store {
@@ -23,11 +24,12 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
             .busy_timeout(Duration::from_secs(5));
+        let database_path = options.get_filename().to_owned();
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(options)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        migrations::run(&pool, &database_path).await?;
         Ok(Self {
             pool,
             writes: WriteCoordinator::default(),

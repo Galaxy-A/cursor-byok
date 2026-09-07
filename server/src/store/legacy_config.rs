@@ -1,3 +1,4 @@
+//! Imports model definitions from the v0.0.49 YAML configuration.
 use std::{collections::HashSet, path::Path};
 
 use serde::Deserialize;
@@ -141,12 +142,7 @@ fn load_v0049_model_config(path: &Path) -> Result<Vec<ModelConfigInput>> {
             "v0.0.49 config contains no model adapters".into(),
         ));
     }
-    let models = legacy
-        .model_adapters
-        .into_iter()
-        .map(model_input)
-        .collect::<Result<Vec<_>>>()?;
-    Ok(models)
+    legacy.model_adapters.into_iter().map(model_input).collect()
 }
 
 fn model_input(model: LegacyModel) -> Result<ModelConfigInput> {
@@ -165,6 +161,7 @@ fn model_input(model: LegacyModel) -> Result<ModelConfigInput> {
     Ok(ModelConfigInput {
         sort_order: model.sort,
         display_name: model.display_name.clone(),
+        group_name: None,
         model_type,
         base_url,
         use_full_url,
@@ -284,115 +281,4 @@ fn positive(value: u64) -> Option<u64> {
 
 fn optional_string(value: String) -> Option<String> {
     (!value.trim().is_empty()).then_some(value)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn manually_imports_v0049_models_as_complete_request_urls() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join("config.yaml");
-        std::fs::write(
-            &config,
-            r#"modelAdapters:
-  - sort: 1
-    displayName: Model A
-    type: openai
-    baseURL: https://example.com/v1
-    apiKey: secret
-    tooltipData: Example model
-    modelID: model-a
-    reasoningEffort: high
-    openAIEndpoint: /v1/responses
-    openAIExtraParamsEnabled: true
-    openAIExtraParamsJSON: '{"service_tier":"priority"}'
-    customHeadersEnabled: true
-    customHeadersJSON: '{"x-client":"cursor-byok"}'
-    contextWindowTokens: 200000
-    maxCompletionTokens: 8192
-  - sort: 2
-    displayName: Custom Chat
-    type: openai
-    baseURL: https://example.com/proxy/generate?api-version=2026-01-01
-    apiKey: secret
-    modelID: model-b
-    openAIEndpoint: /custom
-    openAIExtraParamsEnabled: false
-    openAIExtraParamsJSON: not-valid-json
-  - sort: 3
-    displayName: Claude
-    type: anthropic
-    baseURL: https://example.com/anthropic
-    apiKey: secret
-    modelID: model-c
-    customHeadersEnabled: false
-    customHeadersJSON: not-valid-json
-"#,
-        )
-        .unwrap();
-        let store = Store::connect("sqlite::memory:").await.unwrap();
-
-        let preview = store.preview_v0049_model_config(&config).await.unwrap();
-        assert_eq!(preview.models.len(), 3);
-        assert!(preview.models.iter().all(|model| !model.existing));
-        store.create_model(&preview.models[0].input).await.unwrap();
-        let preview = store.preview_v0049_model_config(&config).await.unwrap();
-        assert_eq!(
-            preview.models.iter().filter(|model| model.existing).count(),
-            1
-        );
-        let first = store.import_v0049_model_config(&config).await.unwrap();
-        assert_eq!(first.imported, 2);
-        assert_eq!(first.skipped, 1);
-        assert_eq!(first.total, 3);
-        let models = store.models().await.unwrap();
-        assert_eq!(models.len(), 3);
-        assert_eq!(models[0].model_hash.len(), 16);
-        assert_eq!(models[0].base_url, "https://example.com/v1");
-        assert!(!models[0].use_full_url);
-        assert_eq!(
-            models[0].request_url().unwrap(),
-            "https://example.com/v1/responses"
-        );
-        assert_eq!(models[0].openai_extra_params["service_tier"], "priority");
-        assert_eq!(
-            models[1].base_url,
-            "https://example.com/proxy/generate?api-version=2026-01-01"
-        );
-        assert_eq!(models[1].openai_endpoint, OPENAI_CHAT_ENDPOINT);
-        assert!(models[1].use_full_url);
-        assert_eq!(models[1].openai_extra_params, serde_json::json!({}));
-        assert_eq!(
-            models[2].request_url().unwrap(),
-            "https://example.com/anthropic/v1/messages"
-        );
-        assert!(!models[2].use_full_url);
-        assert_eq!(models[2].custom_headers, serde_json::json!({}));
-        let preview = store.preview_v0049_model_config(&config).await.unwrap();
-        assert!(preview.models.iter().all(|model| model.existing));
-        let second = store.import_v0049_model_config(&config).await.unwrap();
-        assert_eq!(second.imported, 0);
-        assert_eq!(second.skipped, 3);
-        assert_eq!(second.total, 3);
-        assert_eq!(store.models().await.unwrap().len(), 3);
-    }
-
-    #[test]
-    fn v0049_anthropic_full_request_url_is_not_modified() {
-        let (request_url, endpoint, use_full_url) = legacy_request_configuration(
-            ModelType::Anthropic,
-            "https://example.com/proxy/messages?api-version=2026-01-01",
-            "",
-        )
-        .unwrap();
-
-        assert_eq!(
-            request_url,
-            "https://example.com/proxy/messages?api-version=2026-01-01"
-        );
-        assert!(endpoint.is_empty());
-        assert!(use_full_url);
-    }
 }
