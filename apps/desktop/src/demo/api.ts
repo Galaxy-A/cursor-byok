@@ -8,6 +8,7 @@ import type {
   ProxySettings,
   StatisticsStorage,
   TabSettings,
+  TokenPricingSettings,
 } from "../shared/api";
 
 const API_ROOT = "/__byok-api__/api";
@@ -94,6 +95,12 @@ let proxySettings: ProxySettings = {
   has_password: false,
 };
 let tabSettings: TabSettings = { mode: "public", address: "" };
+let pricingSettings: TokenPricingSettings = {
+  input_per_million: 5,
+  output_per_million: 25,
+  cache_read_per_million: 0.5,
+  cache_write_per_million: 6.25,
+};
 let storage: StatisticsStorage = { bytes: 26_004_480, call_count: calls.length, trace_count: calls.length };
 
 export function installDemoApi() {
@@ -167,6 +174,11 @@ export function installDemoApi() {
       return json(tabSettings);
     }
     if (path === "/settings/desktop" && method === "GET") return json({ silent_start: false, show_dock_icon: true });
+    if (path === "/settings/pricing" && method === "GET") return json(pricingSettings);
+    if (path === "/settings/pricing" && method === "PUT") {
+      pricingSettings = body as TokenPricingSettings;
+      return json(pricingSettings);
+    }
     if (path === "/settings/desktop") return json(body);
     if (path === "/desktop/open-external-url") {
       const target = (body as { url?: string } | null)?.url;
