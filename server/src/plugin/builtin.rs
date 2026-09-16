@@ -299,4 +299,32 @@ mod tests {
         );
         assert!(!plugin.join("stale.ts").exists());
     }
+
+    #[test]
+    fn antigravity_upgrade_replaces_the_previous_model_catalog() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin = root.path().join("antigravity-auth");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("plugin.json"), r#"{"version":"0.1.8"}"#).unwrap();
+        std::fs::write(plugin.join("models.ts"), "// previous model catalog").unwrap();
+        std::fs::write(plugin.join("provider.ts"), "// previous provider").unwrap();
+
+        install(root.path()).unwrap();
+
+        assert_ne!(disk_version(&plugin).as_deref(), Some("0.1.8"));
+        for relative in ["models.ts", "provider.ts"] {
+            let embedded = ANTIGRAVITY_AUTH
+                .iter()
+                .find(|(name, _)| *name == relative)
+                .unwrap()
+                .1;
+            assert_eq!(
+                std::fs::read_to_string(plugin.join(relative)).unwrap(),
+                embedded
+            );
+        }
+        assert!(std::fs::read_to_string(plugin.join("models.ts"))
+            .unwrap()
+            .contains("gemini-3.8-flash-high"));
+    }
 }

@@ -8,6 +8,11 @@ import type { LlmRequest, ModelEvent } from "cursor-byok:provider";
 import type { ResourceSnapshot } from "cursor-byok:resource";
 import { antigravityProvider, isQuotaError } from "./provider.ts";
 import { RESOURCE_TYPE } from "./resources.ts";
+import {
+  ANTIGRAVITY_DAILY_ENDPOINT,
+  ANTIGRAVITY_USER_AGENT,
+  STATIC_ANTIGRAVITY_MODELS,
+} from "./models.ts";
 
 function assert(condition: unknown, message = "assertion failed"): asserts condition {
   if (!condition) throw new Error(message);
@@ -143,4 +148,44 @@ Deno.test("isQuotaError identifies rate limits and quota exhaustion", () => {
   assert(isQuotaError("Rate limit exceeded for model"));
   assert(isQuotaError("HTTP 429 Too Many Requests"));
   assert(!isQuotaError("Invalid authorization header"));
+});
+
+Deno.test("Gemini 3.8 variants preserve model IDs and use the updated client headers", async () => {
+  const ids = ["high", "medium", "low", "tiered"].map((tier) => `gemini-3.8-flash-${tier}`);
+  for (const id of ids) {
+    assert(STATIC_ANTIGRAVITY_MODELS.some((model) => model.id === id));
+  }
+  for (const id of ["gemini-3.8-flash", ...ids]) {
+    let dispatched = false;
+    const result = await antigravityProvider.invoke(
+      {
+        model: { id, displayName: id, privateData: {} },
+        resource: snapshot({
+          accessToken: "mock-access-token",
+          refreshToken: "mock-refresh-token",
+          expiresAt: Date.now() + 3600_000,
+          projectId: "test-project",
+        }),
+        request: request(),
+      },
+      { emit: () => {} },
+      context({
+        stream: (url, init) => {
+          dispatched = true;
+          assert(url.startsWith(`${ANTIGRAVITY_DAILY_ENDPOINT}/`));
+          assertEquals(JSON.parse(init?.body ?? "{}").model, id);
+          assertEquals(init?.headers?.["user-agent"], ANTIGRAVITY_USER_AGENT);
+          assert(!("x-client-version" in (init?.headers ?? {})));
+          assert(!("x-client-name" in (init?.headers ?? {})));
+          return {
+            status: 200,
+            headers: {},
+            lines: sse(['data: {"response":{"candidates":[{"finishReason":"STOP"}]}}']),
+          };
+        },
+      }),
+    );
+    assert(dispatched);
+    assertEquals(result, { status: "completed" });
+  }
 });
