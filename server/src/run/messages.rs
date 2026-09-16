@@ -57,7 +57,7 @@ pub(super) fn drain_accepted(client: &mut RunPort) -> Result<Vec<MessageBatch>, 
     }
 }
 
-async fn append_one(
+pub(super) async fn append_one(
     store: &Store,
     prepared: &PreparedRun,
     client: &mut RunPort,

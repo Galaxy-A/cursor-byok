@@ -378,7 +378,12 @@ fn every_captured_mode_owns_and_renders_its_runtime_template() {
     ] {
         let rendered = compiler.runtime_message(mode, &values).unwrap();
         assert!(rendered.contains(marker), "missing {mode:?} marker");
-        assert!(rendered.contains("<user_query>\nquestion\n</user_query>"));
+        assert!(
+            rendered
+                .replace("\r\n", "\n")
+                .contains("<user_query>\nquestion\n</user_query>"),
+            "missing or malformed user_query block for {mode:?}"
+        );
         assert_eq!(rendered.matches("<user_query>").count(), 1);
     }
 }
