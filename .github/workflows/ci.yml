@@ -108,7 +108,7 @@ jobs:
   package:
     name: Package (${{ matrix.platform }})
     needs: [rust, frontend, desktop-rust]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/Test/') && github.repository == 'Galaxy-A/cursor-byok'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/Test/')) && github.repository == 'Galaxy-A/cursor-byok'
     strategy:
       fail-fast: false
       matrix:

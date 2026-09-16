@@ -7,6 +7,26 @@ const read = (path) => readFileSync(new URL(path, root), "utf8");
 const config = JSON.parse(read("apps/desktop/src-tauri/tauri.conf.json"));
 const repository = "Galaxy-A/cursor-byok";
 
+test("main builds downloadable bundles without publishing a release", () => {
+  const ci = read(".github/workflows/ci.yml");
+  assert.ok(ci.includes("needs: [rust, frontend, desktop-rust]"));
+  assert.ok(ci.includes(
+    "if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/Test/')) && github.repository == 'Galaxy-A/cursor-byok'",
+  ));
+  assert.ok(ci.includes("uses: actions/upload-artifact@v4"));
+  assert.ok(ci.includes("retention-days: 7"));
+  assert.doesNotMatch(ci, /releaseDraft:|tagName:|gh release/);
+});
+
+test("formal releases require a version tag contained in main", () => {
+  const release = read(".github/workflows/release.yml");
+  assert.match(release, /on:\s+push:\s+tags:\s+- "v\*"/);
+  assert.doesNotMatch(release, /workflow_dispatch:|branches:/);
+  assert.ok(release.includes('test "${GITHUB_REF_NAME}" = "v${version}"'));
+  assert.ok(release.includes('git merge-base --is-ancestor "${GITHUB_SHA}" origin/main'));
+  assert.ok(release.includes("prerelease: false"));
+});
+
 test("desktop version agrees across package manifests and lockfiles", () => {
   const version = config.version;
   const pkg = JSON.parse(read("apps/desktop/package.json"));
