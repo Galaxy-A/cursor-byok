@@ -101,7 +101,7 @@ let pricingSettings: TokenPricingSettings = {
   cache_read_per_million: 0.5,
   cache_write_per_million: 6.25,
 };
-let storage: StatisticsStorage = { bytes: 26_004_480, call_count: calls.length, trace_count: calls.length };
+let storage: StatisticsStorage = { call_count: calls.length, trace_count: calls.length };
 
 export function installDemoApi() {
   const nativeFetch = window.fetch.bind(window);
@@ -157,9 +157,7 @@ export function installDemoApi() {
     if (path === "/settings/storage/statistics" && method === "GET") return json(storage);
     if (path === "/settings/storage/statistics") {
       const scope = (body as { scope?: string } | null)?.scope ?? "details";
-      storage = scope === "all"
-        ? { bytes: 0, call_count: 0, trace_count: 0 }
-        : { ...storage, bytes: 0 };
+      storage = scope === "all" ? { call_count: 0, trace_count: 0 } : storage;
       return json(storage);
     }
     if (path === "/settings/proxy" && method === "GET") return json(proxySettings);
