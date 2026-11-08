@@ -169,6 +169,11 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      - name: Prepare Tauri tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/prepare-tauri-tools.mjs
+
       - name: Build signed bundles without creating a release
         id: bundle
         uses: tauri-apps/tauri-action@v1

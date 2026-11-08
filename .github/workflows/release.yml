@@ -133,6 +133,11 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      - name: Prepare Tauri tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/prepare-tauri-tools.mjs
+
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
