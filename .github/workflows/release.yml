@@ -148,6 +148,7 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           args: ${{ matrix.args }}
+          retryAttempts: 1
 
       - name: Package legacy Linux updater asset
         if: matrix.platform == 'linux-x86_64'

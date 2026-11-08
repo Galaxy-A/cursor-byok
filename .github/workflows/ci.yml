@@ -179,6 +179,7 @@ jobs:
         with:
           projectPath: apps/desktop
           args: ${{ matrix.args }}
+          retryAttempts: 1
 
       - name: Collect bundle paths
         id: artifacts
