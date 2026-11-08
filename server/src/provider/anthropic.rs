@@ -51,7 +51,8 @@ impl Provider for AnthropicProvider {
         let config = self.config.clone();
         let recorder = self.recorder.clone();
         Box::pin(try_stream! {
-            let ModelInvocation { call_id, request, .. } = invocation;
+            let call_id = invocation.call_id.clone();
+            let request = &invocation.request;
             let mut messages = anthropic_messages(&request.history)?;
             mark_cache_breakpoint(&mut messages);
             let system = if request.prompt.instructions.is_empty() {
@@ -81,8 +82,7 @@ impl Provider for AnthropicProvider {
                     value
                 }).collect::<Vec<_>>());
             }
-            apply_model(&mut body, &request.model)?;
-            merge_extra_params(&mut body, &request.model.extra_params)?;
+            prepare_body(&mut body, &invocation, &config)?;
             let request_headers = recorded_headers(
                 &config,
                 &[("content-type", "application/json"), ("anthropic-version", "2023-06-01")],
@@ -300,18 +300,37 @@ fn close_anthropic_block(
     }
 }
 
+pub(crate) fn prepare_body(
+    body: &mut Value,
+    invocation: &ModelInvocation,
+    config: &ProviderConfig,
+) -> Result<()> {
+    let request = &invocation.request;
+    body["max_tokens"] = json!(request
+        .model
+        .max_output_tokens
+        .or(config.max_output_tokens)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS));
+    apply_model(body, &request.model)?;
+    merge_extra_params(body, &request.model.extra_params)?;
+    Ok(())
+}
+
 fn apply_model(body: &mut Value, model: &crate::model::ModelSpec) -> Result<()> {
     let object = body
         .as_object_mut()
         .ok_or_else(|| Error::Provider("Anthropic request body is not an object".into()))?;
     if model.reasoning.enabled {
-        object.insert(
-            "thinking".into(),
-            json!({"type":"adaptive", "display":"summarized"}),
-        );
+        object
+            .entry("thinking")
+            .or_insert_with(|| json!({"type":"adaptive", "display":"summarized"}));
     }
     if let Some(effort) = &model.reasoning.effort {
-        object.insert("output_config".into(), json!({"effort":effort}));
+        let output = object.entry("output_config").or_insert_with(|| json!({}));
+        output
+            .as_object_mut()
+            .ok_or_else(|| Error::Protocol("output_config must be an object".into()))?
+            .insert("effort".into(), json!(effort));
     }
     Ok(())
 }
@@ -480,7 +499,7 @@ fn required_u64(value: &Value, name: &str) -> Result<u64> {
         .ok_or_else(|| Error::Provider(format!("Anthropic event is missing {name}")))
 }
 
-fn anthropic_usage(value: &Value) -> Usage {
+pub(crate) fn anthropic_usage(value: &Value) -> Usage {
     let input_tokens = value.get("input_tokens").and_then(Value::as_u64);
     let cache_read_tokens = value.get("cache_read_input_tokens").and_then(Value::as_u64);
     let cache_write_tokens = value

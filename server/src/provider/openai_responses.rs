@@ -82,14 +82,8 @@ impl Provider for OpenAiResponsesProvider {
                     "parameters":tool.parameters, "strict":false
                 })).collect::<Vec<_>>());
             }
-            apply_model(&mut body, &request.model, config.max_output_tokens)?;
-            merge_extra_params(&mut body, &request.model.extra_params)?;
-            apply_openai_prompt_cache_key(&mut body, &request.model.model_id)?;
+            prepare_body(&mut body, &invocation, &config)?;
             let codex_identity = request.model.codex_outbound_enabled.then(|| codex::identity(&invocation));
-            if request.model.codex_outbound_enabled {
-                codex::apply_body(&mut body, &invocation);
-            }
-            apply_body_allowlist(&mut body, config.allowed_body_fields.as_ref())?;
             let request_headers = if let Some(identity) = &codex_identity {
                 let defaults = [
                     ("content-type", "application/json"),
@@ -386,6 +380,22 @@ fn update_response_tool(
     Ok(events)
 }
 
+pub(crate) fn prepare_body(
+    body: &mut Value,
+    invocation: &ModelInvocation,
+    config: &ProviderConfig,
+) -> Result<()> {
+    let request = &invocation.request;
+    apply_model(body, &request.model, config.max_output_tokens)?;
+    merge_extra_params(body, &request.model.extra_params)?;
+    apply_openai_prompt_cache_key(body, &request.model.model_id)?;
+    if request.model.codex_outbound_enabled {
+        codex::apply_body(body, invocation);
+    }
+    apply_body_allowlist(body, config.allowed_body_fields.as_ref())?;
+    Ok(())
+}
+
 fn apply_model(
     body: &mut Value,
     model: &crate::model::ModelSpec,
@@ -398,8 +408,12 @@ fn apply_model(
         object.insert("max_output_tokens".into(), json!(max));
     }
     if model.reasoning.enabled || model.reasoning.effort.is_some() {
-        let mut reasoning = Map::new();
-        reasoning.insert("summary".into(), json!("auto"));
+        let mut reasoning = object
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        reasoning.entry("summary").or_insert_with(|| json!("auto"));
         if let Some(effort) = &model.reasoning.effort {
             reasoning.insert("effort".into(), json!(effort));
         }
@@ -550,7 +564,7 @@ fn required_u64(value: &Value, name: &str) -> Result<u64> {
         .ok_or_else(|| Error::Provider(format!("OpenAI Responses event is missing {name}")))
 }
 
-fn responses_usage(value: &Value) -> Usage {
+pub(crate) fn responses_usage(value: &Value) -> Usage {
     let input_tokens = value.get("input_tokens").and_then(Value::as_u64);
     Usage {
         input_tokens,

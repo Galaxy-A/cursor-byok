@@ -23,8 +23,8 @@ use crate::{
     plugin::{PluginDescriptor, PluginRegistry, PluginRuntime, PluginRuntimeStatus},
     provider::{is_valid_response_event, ModelEvent, Provider},
     store::{
-        CommitSettings, DesktopSettings, PortSettings, ProxySettings, ProxySettingsInput,
-        StatisticsStorage, Store, TabSettings, TokenPricingSettings,
+        CommitSettings, DesktopSettings, ExternalApiSettings, PortSettings, ProxySettings,
+        ProxySettingsInput, StatisticsStorage, Store, TabSettings, TokenPricingSettings,
     },
     Error, Result,
 };
@@ -543,10 +543,13 @@ impl ControlService {
             .llm_calls(limit)
             .await?
             .into_iter()
-            .map(|call| CallSummary {
-                call,
-                call_kind: "provider_llm",
-                route: "local_byok",
+            .map(|call| {
+                let route = call_route(&call.run_id);
+                CallSummary {
+                    call,
+                    call_kind: "provider_llm",
+                    route,
+                }
             })
             .collect::<Vec<_>>();
         calls.extend(
@@ -564,13 +567,14 @@ impl ControlService {
     pub async fn call(&self, call_id: &str) -> Result<CallDetail> {
         if let Some(call) = self.store.llm_call(call_id).await? {
             let cursor_trace = self.cursor_trace_detail(&call.run_id).await?;
+            let route = call_route(&call.run_id);
             return Ok(CallDetail {
                 request: self.store.llm_call_request(call_id).await?,
                 response_chunks: self.store.llm_call_chunks(call_id).await?,
                 call: CallSummary {
                     call,
                     call_kind: "provider_llm",
-                    route: "local_byok",
+                    route,
                 },
                 cursor_trace,
             });
@@ -627,6 +631,17 @@ impl ControlService {
 
     pub async fn ports(&self) -> Result<PortSettings> {
         self.store.port_settings().await
+    }
+
+    pub async fn external_api_settings(&self) -> Result<ExternalApiSettings> {
+        self.store.external_api_settings().await
+    }
+
+    pub async fn set_external_api_settings(
+        &self,
+        settings: ExternalApiSettings,
+    ) -> Result<ExternalApiSettings> {
+        self.store.set_external_api_settings(settings).await
     }
 
     pub async fn set_ports(&self, settings: PortSettings) -> Result<PortSettings> {
@@ -707,6 +722,14 @@ fn model_test_timeout(
         .max(provider_stream_idle_timeout)
         .max(Duration::from_secs(300))
         .saturating_add(Duration::from_secs(60))
+}
+
+fn call_route(run_id: &str) -> &'static str {
+    if run_id.starts_with("external-api:") {
+        "external_api"
+    } else {
+        "local_byok"
+    }
 }
 
 fn official_call(trace: CursorRunTraceSummary) -> CallSummary {

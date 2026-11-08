@@ -18,10 +18,42 @@ use tokio_util::sync::CancellationToken;
 use crate::{model::ModelInvocation, Result};
 
 pub use anthropic::AnthropicProvider;
+pub(crate) use codex::{apply_headers as apply_codex_headers, identity as codex_identity};
 pub use event::*;
 pub use openai_chat::OpenAiChatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 pub use recorder::CallRecorder;
+pub(crate) use router::configure_invocation;
+
+pub(crate) fn prepare_native_body(
+    body: &mut serde_json::Value,
+    invocation: &ModelInvocation,
+    config: &crate::config::ProviderConfig,
+) -> Result<()> {
+    match config.kind {
+        crate::config::ProviderKind::OpenAiChat => {
+            openai_chat::prepare_body(body, invocation, config)
+        }
+        crate::config::ProviderKind::OpenAiResponses => {
+            openai_responses::prepare_body(body, invocation, config)
+        }
+        crate::config::ProviderKind::Anthropic => anthropic::prepare_body(body, invocation, config),
+    }
+}
+
+pub(crate) fn native_usage(
+    kind: crate::model::ProviderType,
+    value: &serde_json::Value,
+) -> crate::model::Usage {
+    match kind {
+        crate::model::ProviderType::OpenAiChat => openai_chat::openai_usage(value),
+        crate::model::ProviderType::OpenAiResponses => openai_responses::responses_usage(value),
+        crate::model::ProviderType::Anthropic => anthropic::anthropic_usage(value),
+        crate::model::ProviderType::Plugin => {
+            unreachable!("plugin calls have no native HTTP protocol")
+        }
+    }
+}
 pub use router::{build as build_provider, ProviderRouter};
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<ModelEvent>> + Send>>;

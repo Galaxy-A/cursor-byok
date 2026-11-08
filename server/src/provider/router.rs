@@ -81,31 +81,9 @@ impl Provider for ProviderRouter {
                     let model = store.model(&selected).await?.ok_or_else(|| Error::Provider(format!("unknown model: {selected}")))?;
                     let provider_type = model.provider_type();
                     let request_url = model.request_url()?;
-                    model.configure(&mut routed.request.model);
-                    routed.request.model.extra_params =
-                        super::request_template::render_json_strings(
-                            model.extra_params(),
-                            &invocation.conversation_id,
-                        );
-                    routed.request.model.model_id = model.model_id.clone();
+                    let config = configure_invocation(&model, &mut routed, request_timeout)?;
                     let recorder = start_recorder(&store, &invocation, &model.model_hash, &model.display_name, provider_type, &request_url, &model.model_id).await?;
                     let guard = recorder.cancel_on_drop();
-                    let config = ProviderConfig {
-                        kind: provider_kind(provider_type),
-                        request_url,
-                        api_key: model.api_key.clone(),
-                        custom_headers: if model.custom_headers_enabled {
-                            custom_headers(
-                                &model.custom_headers,
-                                &invocation.conversation_id,
-                            )?
-                        } else {
-                            reqwest::header::HeaderMap::new()
-                        },
-                        max_output_tokens: model.max_output_tokens(),
-                        request_timeout,
-                        allowed_body_fields: None,
-                    };
                     let client = clients.provider_client(request_timeout).await?;
                     let provider = build_observed(&config, recorder.clone(), client)?;
                     (recorder, guard, provider.stream(routed, cancellation.clone()))
@@ -173,6 +151,32 @@ impl Provider for ProviderRouter {
             finish_stream(&recorder, &cancellation).await?;
         })
     }
+}
+
+pub(crate) fn configure_invocation(
+    model: &crate::model::ModelConfig,
+    invocation: &mut ModelInvocation,
+    request_timeout: Duration,
+) -> Result<ProviderConfig> {
+    model.configure(&mut invocation.request.model);
+    invocation.request.model.extra_params = super::request_template::render_json_strings(
+        model.extra_params(),
+        &invocation.conversation_id,
+    );
+    invocation.request.model.model_id = model.model_id.clone();
+    Ok(ProviderConfig {
+        kind: provider_kind(model.provider_type()),
+        request_url: model.request_url()?,
+        api_key: model.api_key.clone(),
+        custom_headers: if model.custom_headers_enabled {
+            custom_headers(&model.custom_headers, &invocation.conversation_id)?
+        } else {
+            reqwest::header::HeaderMap::new()
+        },
+        max_output_tokens: model.max_output_tokens(),
+        request_timeout,
+        allowed_body_fields: None,
+    })
 }
 
 fn event_name(event: &super::ModelEvent) -> &'static str {
@@ -308,7 +312,7 @@ fn root_error_message(error: &(dyn std::error::Error + 'static)) -> String {
     current.to_string()
 }
 
-fn custom_headers(
+pub(crate) fn custom_headers(
     value: &serde_json::Value,
     conversation_id: &str,
 ) -> Result<reqwest::header::HeaderMap> {

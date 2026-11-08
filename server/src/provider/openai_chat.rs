@@ -64,7 +64,8 @@ impl Provider for OpenAiChatProvider {
         let config = self.config.clone();
         let recorder = self.recorder.clone();
         Box::pin(try_stream! {
-            let ModelInvocation { call_id, request, .. } = invocation;
+            let call_id = invocation.call_id.clone();
+            let request = &invocation.request;
             tracing::debug!(
                 model = %request.model.model_id,
                 call_id = %call_id,
@@ -84,10 +85,7 @@ impl Provider for OpenAiChatProvider {
                     "name": tool.name, "description": tool.description, "parameters": tool.parameters
                 }})).collect::<Vec<_>>());
             }
-            apply_model(&mut body, &request.model, config.max_output_tokens)?;
-            merge_extra_params(&mut body, &request.model.extra_params)?;
-            apply_openai_prompt_cache_key(&mut body, &request.model.model_id)?;
-            apply_body_allowlist(&mut body, config.allowed_body_fields.as_ref())?;
+            prepare_body(&mut body, &invocation, &config)?;
             let request_headers = recorded_headers(&config, &[("content-type", "application/json")]);
             if let Some(recorder) = &recorder {
                 recorder.request(request_headers.clone(), &body).await?;
@@ -215,6 +213,19 @@ impl Provider for OpenAiChatProvider {
     }
 }
 
+pub(crate) fn prepare_body(
+    body: &mut Value,
+    invocation: &ModelInvocation,
+    config: &ProviderConfig,
+) -> Result<()> {
+    let request = &invocation.request;
+    apply_model(body, &request.model, config.max_output_tokens)?;
+    merge_extra_params(body, &request.model.extra_params)?;
+    apply_openai_prompt_cache_key(body, &request.model.model_id)?;
+    apply_body_allowlist(body, config.allowed_body_fields.as_ref())?;
+    Ok(())
+}
+
 fn apply_model(
     body: &mut Value,
     model: &crate::model::ModelSpec,
@@ -224,6 +235,7 @@ fn apply_model(
         .as_object_mut()
         .ok_or_else(|| Error::Provider("OpenAI Chat request body is not an object".into()))?;
     if let Some(max) = model.max_output_tokens.or(route_max_output_tokens) {
+        object.remove("max_tokens");
         object.insert("max_completion_tokens".into(), json!(max));
     }
     if let Some(effort) = &model.reasoning.effort {
